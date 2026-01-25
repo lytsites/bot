@@ -38,27 +38,35 @@ def apply_migrations(con: sqlite3.Connection) -> None:
         sql_text = path.read_text(encoding="utf-8")
         try:
             con.executescript(sql_text)
-        except sqlite3.OperationalError as e:
-            if version == "008" and "duplicate column name" in str(e):
-                try:
-                    con.execute("ALTER TABLE accounts ADD COLUMN local_user_id INTEGER;")
-                except sqlite3.OperationalError as e2:
-                    if "duplicate column name" not in str(e2):
-                        raise
-                con.execute(
-                    """
-                    UPDATE accounts
-                    SET local_user_id = (SELECT id FROM local_users WHERE login='admin1')
-                    WHERE local_user_id IS NULL
-                      AND EXISTS (SELECT 1 FROM local_users WHERE login='admin1')
-                    """
-                )
-            else:
-                raise
         except sqlite3.IntegrityError as e:
             if version == "012" and "UNIQUE constraint failed" in str(e):
                 _dedupe_group_matches(con)
                 con.executescript(sql_text)
+            else:
+                raise
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e):
+                if version == "008":
+                    try:
+                        con.execute("ALTER TABLE accounts ADD COLUMN local_user_id INTEGER;")
+                    except sqlite3.OperationalError as e2:
+                        if "duplicate column name" not in str(e2):
+                            raise
+                    con.execute(
+                        """
+                        UPDATE accounts
+                        SET local_user_id = (SELECT id FROM local_users WHERE login='admin1')
+                        WHERE local_user_id IS NULL
+                          AND EXISTS (SELECT 1 FROM local_users WHERE login='admin1')
+                        """
+                    )
+                elif version == "005":
+                    _ensure_auth_flow_columns(con)
+                elif version == "013":
+                    # sender_phone already added
+                    pass
+                else:
+                    raise
             else:
                 raise
         con.execute(
@@ -99,3 +107,13 @@ def _dedupe_group_matches(con: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _ensure_auth_flow_columns(con: sqlite3.Connection) -> None:
+    # Make 005 idempotent if columns already exist
+    for col in ("method", "qr_token", "qr_expires_at", "qr_refresh_after", "error_message"):
+        try:
+            con.execute(f"ALTER TABLE auth_flows ADD COLUMN {col} TEXT;")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
