@@ -1,9 +1,11 @@
 @echo off
 setlocal
 
-rem === Paths ===
-set "FRONT_DIR=C:\Users\HACKER\Desktop\tg-web-auth\frontend"
-set "BACK_DIR=C:\Users\HACKER\Desktop\tg-web-auth\backend"
+rem === Paths (relative to this launcher) ===
+set "ROOT_DIR=%~dp0"
+set "ROOT_DIR=%ROOT_DIR:~0,-1%"
+set "FRONT_DIR=%ROOT_DIR%\frontend"
+set "BACK_DIR=%ROOT_DIR%\backend"
 
 rem === Backend BATs ===
 set "AUTH_BAT=%BACK_DIR%\run_auth.bat"

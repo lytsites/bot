@@ -6,8 +6,9 @@ import re
 
 # ================== НАСТРОЙКИ ==================
 
-FRONT_DIR = r"C:\Users\HACKER\Desktop\tg-web-auth\frontend"
-BACK_DIR  = r"C:\Users\HACKER\Desktop\tg-web-auth\backend"
+ROOT_DIR = __import__("os").path.dirname(__file__)
+FRONT_DIR = __import__("os").path.join(ROOT_DIR, "frontend")
+BACK_DIR = __import__("os").path.join(ROOT_DIR, "backend")
 
 COMMANDS = [
     {"title": "Frontend (npm run dev)", "cmd": ["cmd", "/k", "npm run dev"], "cwd": FRONT_DIR},
