@@ -54,7 +54,7 @@ def local_login(req: LoginReq):
     with db() as con:
         row = con.execute(
             """
-            SELECT id, is_active FROM local_users
+            SELECT id, is_active, is_admin FROM local_users
             WHERE login=? AND password_hash=?
             """,
             (req.login, password_hash),
@@ -62,7 +62,11 @@ def local_login(req: LoginReq):
     if not row or row["is_active"] != 1:
         raise HTTPException(401, "BAD_CREDENTIALS")
     session = create_session(row["id"])
-    return {"token": session["token"], "expires_at": session["expires_at"]}
+    return {
+        "token": session["token"],
+        "expires_at": session["expires_at"],
+        "is_admin": bool(row["is_admin"]),
+    }
 
 
 @app.post("/local/logout")
@@ -71,6 +75,19 @@ def local_logout(request: Request):
     token = request.headers.get("X-Auth-Token")
     revoke_token(token)
     return {"ok": True, "user_id": user_id}
+
+
+@app.get("/local/me")
+def local_me(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        row = con.execute(
+            "SELECT id, login, is_admin, is_active, created_at FROM local_users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "USER_NOT_FOUND")
+    return dict(row)
 
 
 class SettingsReq(BaseModel):
@@ -385,7 +402,7 @@ def list_dialogs(request: Request, type: str = Query("groups")):
                         }
                     )
                 else:
-                    is_group = ent.__class__.__name__ in ("Chat", "Channel") and getattr(ent, "megagroup", True)
+                    is_group = ent.__class__.__name__ in ("Chat", "Channel")
                     if not is_group:
                         continue
                     items.append(
@@ -414,7 +431,7 @@ def list_groups(request: Request):
     user_id = require_auth(request)
     account_id, session_string = _get_active_account_session(user_id)
     if not account_id or not session_string:
-        return {"account_id": None, "items": []}
+        return {"account_id": None, "worker_id": None, "items": []}
 
     cached_items = _get_cached_groups(account_id, max_age_sec=60)
     if cached_items is None:
@@ -426,7 +443,7 @@ def list_groups(request: Request):
                 items = []
                 for d in dialogs:
                     ent = d.entity
-                    is_group = ent.__class__.__name__ in ("Chat", "Channel") and getattr(ent, "megagroup", True)
+                    is_group = ent.__class__.__name__ in ("Chat", "Channel")
                     if not is_group:
                         continue
                     items.append(
@@ -472,7 +489,37 @@ def list_groups(request: Request):
         else:
             item["is_listening"] = False
             item["match_count"] = 0
-    return {"account_id": account_id, "items": items}
+    with db() as con:
+        run_row = con.execute(
+            """
+            SELECT id FROM group_worker_runs
+            WHERE account_id=? AND status='RUNNING'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (account_id,),
+        ).fetchone()
+    return {"account_id": account_id, "worker_id": run_row["id"] if run_row else None, "items": items}
+
+
+@app.get("/group_workers")
+def list_group_workers(request: Request, limit: int = Query(100, ge=1, le=500)):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        return {"account_id": None, "items": []}
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT id, account_id, status, started_at, stopped_at, last_error
+            FROM group_worker_runs
+            WHERE account_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (account_id, limit),
+        ).fetchall()
+    return {"account_id": account_id, "items": [dict(r) for r in rows]}
 
 
 @app.post("/groups/{chat_id}/listen")
@@ -569,11 +616,21 @@ def stats(request: Request):
             "SELECT COUNT(*) AS cnt FROM accounts WHERE local_user_id=?",
             (user_id,),
         ).fetchone()["cnt"]
-        workers_active = con.execute(
+        job_workers_active = con.execute(
             """
             SELECT COUNT(*) AS cnt FROM jobs
             WHERE status='RUNNING'
               AND account_id IN (SELECT id FROM accounts WHERE local_user_id=?)
+            """,
+            (user_id,),
+        ).fetchone()["cnt"]
+        group_workers_active = con.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM group_worker_runs gwr
+            JOIN accounts a ON a.id = gwr.account_id
+            WHERE gwr.status='RUNNING'
+              AND a.local_user_id=?
             """,
             (user_id,),
         ).fetchone()["cnt"]
@@ -587,7 +644,7 @@ def stats(request: Request):
         ).fetchone()["cnt"]
     return {
         "accounts_total": accounts_total,
-        "workers_active": workers_active,
+        "workers_active": job_workers_active + group_workers_active,
         "queue_total": queue_total,
     }
 
@@ -689,6 +746,202 @@ def require_auth(request: Request) -> int:
     if not user_id:
         raise HTTPException(401, "UNAUTHORIZED")
     return user_id
+
+
+def require_admin(request: Request) -> int:
+    user_id = require_auth(request)
+    with db() as con:
+        row = con.execute(
+            "SELECT is_admin FROM local_users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+    if not row or row["is_admin"] != 1:
+        raise HTTPException(403, "ADMIN_ONLY")
+    return user_id
+
+
+class AdminUserCreateReq(BaseModel):
+    login: str
+    password: str
+    is_admin: Optional[bool] = False
+    is_active: Optional[bool] = True
+
+
+@app.get("/admin/users")
+def admin_list_users(request: Request):
+    require_admin(request)
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT id, login, is_admin, is_active, created_at, updated_at
+            FROM local_users
+            ORDER BY id DESC
+            """,
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.post("/admin/users")
+def admin_create_user(req: AdminUserCreateReq, request: Request):
+    require_admin(request)
+    if not req.login or not req.password:
+        raise HTTPException(400, "MISSING_FIELDS")
+    password_hash = hash_password(req.password)
+    with db() as con:
+        try:
+            con.execute(
+                """
+                INSERT INTO local_users(login, password_hash, is_active, is_admin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    req.login,
+                    password_hash,
+                    1 if req.is_active else 0,
+                    1 if req.is_admin else 0,
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+        except Exception as e:
+            raise HTTPException(400, f"CREATE_FAILED: {type(e).__name__}: {e}")
+        user_row = con.execute("SELECT last_insert_rowid() AS id").fetchone()
+        con.execute(
+            """
+            INSERT OR IGNORE INTO local_user_settings(user_id, keywords, is_active, created_at, updated_at)
+            VALUES (?, '', 1, ?, ?)
+            """,
+            (user_row["id"], now_iso(), now_iso()),
+        )
+    return {"id": user_row["id"]}
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: int, request: Request, confirm: bool = Query(False)):
+    require_admin(request)
+    if not confirm:
+        raise HTTPException(400, "CONFIRM_REQUIRED")
+    with db() as con:
+        owner = con.execute("SELECT id FROM local_users WHERE id=?", (user_id,)).fetchone()
+        if not owner:
+            raise HTTPException(404, "USER_NOT_FOUND")
+        account_rows = con.execute(
+            "SELECT id FROM accounts WHERE local_user_id=?",
+            (user_id,),
+        ).fetchall()
+        for acc in account_rows:
+            account_id = acc["id"]
+            con.execute("DELETE FROM tg_sessions WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM auth_flows WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM events WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM jobs WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM group_listeners WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM group_matches WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM group_catalog WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM group_worker_runs WHERE account_id=?", (account_id,))
+            con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+        con.execute("DELETE FROM local_sessions WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM local_user_settings WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM local_users WHERE id=?", (user_id,))
+    return {"ok": True}
+
+
+@app.get("/admin/accounts")
+def admin_list_accounts(request: Request):
+    require_admin(request)
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT a.id, a.display_name, a.phone, a.user_id, a.username, a.tags,
+                   a.created_at, a.updated_at, a.is_active, a.local_user_id,
+                   u.login AS local_login
+            FROM accounts a
+            LEFT JOIN local_users u ON u.id = a.local_user_id
+            ORDER BY a.id DESC
+            """,
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.delete("/admin/accounts/{account_id}")
+def admin_delete_account(account_id: int, request: Request, confirm: bool = Query(False)):
+    require_admin(request)
+    if not confirm:
+        raise HTTPException(400, "CONFIRM_REQUIRED")
+    with db() as con:
+        row = con.execute("SELECT id FROM accounts WHERE id=?", (account_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "ACCOUNT_NOT_FOUND")
+        con.execute("DELETE FROM tg_sessions WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM auth_flows WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM events WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM jobs WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM group_listeners WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM group_matches WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM group_catalog WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM group_worker_runs WHERE account_id=?", (account_id,))
+        con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+    return {"ok": True}
+
+
+@app.get("/admin/group_workers")
+def admin_group_workers(request: Request, account_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
+    require_admin(request)
+    with db() as con:
+        if account_id:
+            rows = con.execute(
+                """
+                SELECT id, account_id, status, started_at, stopped_at, last_error
+                FROM group_worker_runs
+                WHERE account_id=?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (account_id, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """
+                SELECT id, account_id, status, started_at, stopped_at, last_error
+                FROM group_worker_runs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.get("/admin/group_matches")
+def admin_group_matches(
+    request: Request,
+    account_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    require_admin(request)
+    params = []
+    filters = []
+    if account_id is not None:
+        filters.append("account_id=?")
+        params.append(account_id)
+    if chat_id is not None:
+        filters.append("chat_id=?")
+        params.append(chat_id)
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with db() as con:
+        rows = con.execute(
+            f"""
+            SELECT id, account_id, chat_id, message_id, message_text, sender_phone, created_at
+            FROM group_matches
+            {where}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
 
 
 def _get_active_account_session(local_user_id: int):

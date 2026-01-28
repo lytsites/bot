@@ -41,6 +41,7 @@ export default function App() {
   const [loginErr, setLoginErr] = useState('')
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [activeTab, setActiveTab] = useState('dashboard')
+  const [isAdmin, setIsAdmin] = useState(false)
   const [keywords, setKeywords] = useState('')
   const [settingsActive, setSettingsActive] = useState(true)
   const [settingsErr, setSettingsErr] = useState('')
@@ -50,11 +51,193 @@ export default function App() {
   const [selectedGroupId, setSelectedGroupId] = useState(null)
   const [messagesTab, setMessagesTab] = useState('groups')
   const [groupMatchCounts, setGroupMatchCounts] = useState({})
+  const [groupWorkerId, setGroupWorkerId] = useState(null)
+  const [groupWorkers, setGroupWorkers] = useState([])
   const [showMatchesModal, setShowMatchesModal] = useState(false)
   const [matchesLoading, setMatchesLoading] = useState(false)
   const [matchesErr, setMatchesErr] = useState('')
   const [matches, setMatches] = useState([])
   const [matchesGroup, setMatchesGroup] = useState(null)
+
+  const [adminUsers, setAdminUsers] = useState([])
+  const [adminAccounts, setAdminAccounts] = useState([])
+  const [adminWorkers, setAdminWorkers] = useState([])
+  const [adminMatches, setAdminMatches] = useState([])
+  const [adminMatchesOffset, setAdminMatchesOffset] = useState(0)
+  const [adminMatchesLimit, setAdminMatchesLimit] = useState(10)
+  const [adminLogin, setAdminLogin] = useState('')
+  const [adminPassword, setAdminPassword] = useState('')
+  const [adminIsAdmin, setAdminIsAdmin] = useState(false)
+  const [adminIsActive, setAdminIsActive] = useState(true)
+  const [adminErr, setAdminErr] = useState('')
+
+  const listeningGroups = useMemo(
+    () => groups.filter(item => item.is_listening),
+    [groups]
+  )
+
+  const sortedGroups = useMemo(() => {
+    return [...groups].sort((a, b) => {
+      const aListen = a.is_listening ? 1 : 0
+      const bListen = b.is_listening ? 1 : 0
+      if (aListen !== bListen) return bListen - aListen
+      const aTitle = (a.title || '').toLowerCase()
+      const bTitle = (b.title || '').toLowerCase()
+      if (aTitle < bTitle) return -1
+      if (aTitle > bTitle) return 1
+      return 0
+    })
+  }, [groups])
+
+  const jobStatusMeta = status => {
+    switch (status) {
+      case 'RUNNING':
+        return { label: 'Работает', cls: 'success' }
+      case 'PENDING':
+        return { label: 'В очереди', cls: 'warn' }
+      case 'DONE':
+        return { label: 'Готово', cls: 'success' }
+      case 'FAILED':
+        return { label: 'Ошибка', cls: 'danger' }
+      case 'CANCELLED':
+        return { label: 'Отменено', cls: 'muted' }
+      default:
+        return { label: status || '—', cls: 'muted' }
+    }
+  }
+
+  const ERROR_MAP = {
+    BAD_CREDENTIALS: 'Неверный логин или пароль',
+    UNAUTHORIZED: 'Требуется вход',
+    ADMIN_ONLY: 'Доступ только для администратора',
+    NO_ACTIVE_ACCOUNT: 'Нет активного Telegram-аккаунта',
+    SETTINGS_NOT_FOUND: 'Настройки не найдены',
+    ACCOUNT_NOT_FOUND: 'Аккаунт не найден',
+    SESSION_NOT_FOUND: 'Сессия не найдена',
+    CONFIRM_REQUIRED: 'Требуется подтверждение',
+    CREATE_FAILED: 'Ошибка создания',
+    PASSWORD_FAILED: 'Неверный пароль 2FA',
+    CODE_INVALID: 'Неверный код',
+    PHONE_CODE_INVALID: 'Неверный код',
+    PHONE_NUMBER_INVALID: 'Неверный номер телефона',
+  }
+
+  const formatError = err => {
+    if (!err) return ''
+    let msg = typeof err === 'string' ? err : (err.message || String(err))
+    msg = msg || ''
+    let detail = ''
+    const trimmed = msg.trim()
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        detail = parsed.detail || parsed.message || parsed.error || ''
+      } catch {
+        detail = ''
+      }
+    }
+    const raw = detail || msg
+    const code = (raw.split(':')[0] || '').trim()
+    if (ERROR_MAP[code]) {
+      const tail = raw.includes(':') ? raw.split(':').slice(1).join(':').trim() : ''
+      return tail ? `${ERROR_MAP[code]}: ${tail}` : ERROR_MAP[code]
+    }
+    return raw
+  }
+
+  const jobTypeLabel = type => {
+    switch ((type || '').toUpperCase()) {
+      case 'GROUP_LISTENER':
+        return 'Мониторинг чатов'
+      case 'CONNECT_CHECK':
+        return 'Проверка подключения'
+      case 'SUBSCRIBE_EVENTS':
+        return 'Подписка на события'
+      case 'READ_LAST_MESSAGES':
+        return 'Чтение сообщений'
+      case 'ANALYZE_MESSAGES':
+        return 'Анализ сообщений'
+      default:
+        return type || '—'
+    }
+  }
+
+  async function loadMe() {
+    try {
+      const r = await mainGet('/local/me')
+      setIsAdmin(r.is_admin === 1 || r.is_admin === true)
+    } catch {
+      setIsAdmin(false)
+    }
+  }
+
+  async function loadAdminUsers() {
+    const r = await mainGet('/admin/users')
+    setAdminUsers(r.items || [])
+  }
+
+  async function loadAdminAccounts() {
+    const r = await mainGet('/admin/accounts')
+    setAdminAccounts(r.items || [])
+  }
+
+  async function loadAdminWorkers() {
+    const r = await mainGet('/admin/group_workers')
+    setAdminWorkers(r.items || [])
+  }
+
+  async function loadAdminMatches(offset = adminMatchesOffset, limit = adminMatchesLimit) {
+    const r = await mainGet(`/admin/group_matches?limit=${limit}&offset=${offset}`)
+    setAdminMatches(r.items || [])
+  }
+
+  async function createAdminUser() {
+    setAdminErr('')
+    try {
+      const r = await mainPost('/admin/users', {
+        login: adminLogin,
+        password: adminPassword,
+        is_admin: adminIsAdmin,
+        is_active: adminIsActive,
+      })
+      if (r?.id) {
+        setAdminLogin('')
+        setAdminPassword('')
+        setAdminIsAdmin(false)
+        setAdminIsActive(true)
+      }
+      await loadAdminUsers()
+    } catch (e) {
+      setAdminErr(formatError(e))
+    }
+  }
+
+  async function deleteAdminUser(userId) {
+    const ok = confirm('Удалить локального пользователя? Это удалит все его аккаунты и данные.')
+    if (!ok) return
+    try {
+      await mainDelete(`/admin/users/${userId}?confirm=true`)
+      await loadAdminUsers()
+      await loadAdminAccounts()
+      await loadAdminWorkers()
+      await loadAdminMatches()
+    } catch (e) {
+      setAdminErr(formatError(e))
+    }
+  }
+
+  async function deleteAdminAccount(accountId) {
+    const ok = confirm('Удалить Telegram-аккаунт? Будут удалены сессии и данные.')
+    if (!ok) return
+    try {
+      await mainDelete(`/admin/accounts/${accountId}?confirm=true`)
+      await loadAdminAccounts()
+      await loadAdminWorkers()
+      await loadAdminMatches()
+    } catch (e) {
+      setAdminErr(formatError(e))
+    }
+  }
 
   const selectedAccount = useMemo(
     () => accounts.find(acc => acc.id === selectedId),
@@ -68,7 +251,7 @@ export default function App() {
       setAuthId(r.auth_id)
       setStatus(r.status)
     } catch (e) {
-      setAuthErr(e.message)
+      setAuthErr(formatError(e))
     }
   }
 
@@ -82,7 +265,7 @@ export default function App() {
       setQrExpiresAt(r.expires_at || '')
       setQrRefreshAfter(r.refresh_after || '')
     } catch (e) {
-      setQrErr(e.message)
+      setQrErr(formatError(e))
     }
   }
 
@@ -96,7 +279,7 @@ export default function App() {
       setQrExpiresAt(r.expires_at || '')
       setQrRefreshAfter(r.refresh_after || '')
     } catch (e) {
-      setQrErr(e.message)
+      setQrErr(formatError(e))
     }
   }
 
@@ -109,7 +292,7 @@ export default function App() {
         setQrErr(r.error_message)
       }
     } catch (e) {
-      setQrErr(e.message)
+      setQrErr(formatError(e))
     }
   }
 
@@ -120,7 +303,7 @@ export default function App() {
       const r = await authPost('/auth/cancel', { auth_id: qrAuthId })
       setQrStatus(r.status)
     } catch (e) {
-      setQrErr(e.message)
+      setQrErr(formatError(e))
     }
   }
 
@@ -130,7 +313,7 @@ export default function App() {
       const r = await authPost('/auth/code', { auth_id: authId, code })
       setStatus(r.status)
     } catch (e) {
-      setAuthErr(e.message)
+      setAuthErr(formatError(e))
     }
   }
 
@@ -148,9 +331,9 @@ export default function App() {
       }
     } catch (e) {
       if (qrStatus === 'WAIT_PASSWORD' && qrAuthId) {
-        setQrErr(e.message)
+        setQrErr(formatError(e))
       } else {
-        setAuthErr(e.message)
+        setAuthErr(formatError(e))
       }
     } finally {
       setAuthSubmitting(false)
@@ -164,7 +347,7 @@ export default function App() {
       const r = await authPost('/auth/cancel/' + authId, {})
       setStatus(r.status)
     } catch (e) {
-      setAuthErr(e.message)
+      setAuthErr(formatError(e))
     }
   }
 
@@ -174,7 +357,7 @@ export default function App() {
       const r = await authGet('/auth/status/' + authId)
       setStatus(r.status)
     } catch (e) {
-      setAuthErr(e.message)
+      setAuthErr(formatError(e))
     }
   }
 
@@ -206,7 +389,7 @@ export default function App() {
       setKeywords(r.keywords || '')
       setSettingsActive(r.is_active === 1 || r.is_active === true)
     } catch (e) {
-      setSettingsErr(e.message)
+      setSettingsErr(formatError(e))
     }
   }
 
@@ -218,7 +401,7 @@ export default function App() {
         is_active: nextActive,
       })
     } catch (e) {
-      setSettingsErr(e.message)
+      setSettingsErr(formatError(e))
     }
   }
 
@@ -238,15 +421,20 @@ export default function App() {
     try {
       const r = await mainGet('/groups')
       setGroups(r.items || [])
+      setGroupWorkerId(r.worker_id || null)
+      const wr = await mainGet('/group_workers')
+      setGroupWorkers(wr.items || [])
       const counts = {}
       for (const item of r.items || []) {
         counts[item.id] = item.match_count || 0
       }
       setGroupMatchCounts(counts)
     } catch (e) {
-      setGroupsErr(e.message)
+      setGroupsErr(formatError(e))
       setGroups([])
       setGroupMatchCounts({})
+      setGroupWorkerId(null)
+      setGroupWorkers([])
     } finally {
       setGroupsLoading(false)
     }
@@ -271,7 +459,7 @@ export default function App() {
       const r = await mainGet(`/groups/${group.id}/matches`)
       setMatches(r.items || [])
     } catch (e) {
-      setMatchesErr(e.message)
+      setMatchesErr(formatError(e))
       setMatches([])
     } finally {
       setMatchesLoading(false)
@@ -296,7 +484,7 @@ export default function App() {
         setGroupMatchCounts(prev => ({ ...prev, [group.id]: 0 }))
       }
     } catch (e) {
-      setUiErr(e.message)
+      setUiErr(formatError(e))
     }
   }
 
@@ -326,7 +514,7 @@ export default function App() {
       await loadActiveSession()
       await loadAccounts()
     } catch (e) {
-      setUiErr(e.message)
+      setUiErr(formatError(e))
     }
   }
 
@@ -343,7 +531,7 @@ export default function App() {
       await loadAccounts()
       await loadSessions(null)
     } catch (e) {
-      setUiErr(e.message)
+      setUiErr(formatError(e))
     }
   }
 
@@ -360,7 +548,7 @@ export default function App() {
       await loadAccounts()
       await loadSessions(null)
     } catch (e) {
-      setUiErr(e.message)
+      setUiErr(formatError(e))
     }
   }
 
@@ -371,16 +559,17 @@ export default function App() {
       await mainPost(`/jobs/${jobId}/cancel`, {})
       await loadJobs(selectedId)
     } catch (e) {
-      setUiErr(e.message)
+      setUiErr(formatError(e))
     }
   }
 
   useEffect(() => {
     if (!loggedIn) return
-    loadAccounts().catch(e => setUiErr(e.message))
+    loadAccounts().catch(e => setUiErr(formatError(e)))
     loadStats().catch(() => {})
     loadActiveSession().catch(() => {})
     loadSettings().catch(() => {})
+    loadMe().catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -400,6 +589,7 @@ export default function App() {
   }, [authId])
 
   const qrStopped = ['READY', 'ERROR', 'CANCELLED', 'EXPIRED'].includes(qrStatus)
+  const [lastAuthRefreshAt, setLastAuthRefreshAt] = useState(0)
 
   useEffect(() => {
     if (!qrAuthId || qrSubmitting || qrStopped) return
@@ -408,6 +598,21 @@ export default function App() {
     }, 2000)
     return () => clearInterval(id)
   }, [qrAuthId, qrSubmitting, qrStopped])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    const ready = status === 'READY' || qrStatus === 'READY'
+    if (!ready) return
+    const now = Date.now()
+    if (now - lastAuthRefreshAt < 2000) return
+    setLastAuthRefreshAt(now)
+    loadAccounts().catch(() => {})
+    loadActiveSession().catch(() => {})
+    loadStats().catch(() => {})
+    if (activeTab === 'messages' && messagesTab === 'groups') {
+      loadGroups().catch(() => {})
+    }
+  }, [status, qrStatus, loggedIn, activeTab, messagesTab, lastAuthRefreshAt])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -428,6 +633,28 @@ export default function App() {
   }, [activeTab, activeAccountId, messagesTab])
 
   useEffect(() => {
+    if (!loggedIn || !isAdmin || activeTab !== 'admin') return
+    loadAdminUsers().catch(() => {})
+    loadAdminAccounts().catch(() => {})
+    loadAdminWorkers().catch(() => {})
+    loadAdminMatches(adminMatchesOffset, adminMatchesLimit).catch(() => {})
+  }, [loggedIn, isAdmin, activeTab, adminMatchesOffset, adminMatchesLimit])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (!activeAccountId) return
+    loadGroups().catch(() => {})
+  }, [activeAccountId, loggedIn])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    const id = setInterval(() => {
+      loadGroups().catch(() => {})
+    }, 10000)
+    return () => clearInterval(id)
+  }, [loggedIn])
+
+  useEffect(() => {
     if (!showMatchesModal || !matchesGroup) return
     const id = setInterval(() => {
       mainGet(`/groups/${matchesGroup.id}/matches`)
@@ -443,11 +670,13 @@ export default function App() {
       const r = await mainPost('/local/login', { login, password: loginPassword }, false)
       setAuthToken(r.token)
       setLoggedIn(true)
+      setIsAdmin(r.is_admin === true)
       await loadAccounts()
       await loadStats()
       await loadSettings()
+      await loadMe()
     } catch (e) {
-      setLoginErr(e.message)
+      setLoginErr(formatError(e))
     }
   }
 
@@ -458,6 +687,7 @@ export default function App() {
     } finally {
       setAuthToken('')
       setLoggedIn(false)
+      setIsAdmin(false)
       setAccounts([])
       setSessions([])
       setJobs([])
@@ -473,45 +703,60 @@ export default function App() {
 
   if (!loggedIn) {
     return (
-      <div className="page">
+      <div className="page login-page">
         <header className="hero">
           <div>
             <div className="eyebrow">TG Web Auth</div>
-            <h1>Вход в систему</h1>
-            <p>Доступ к функциям возможен только после авторизации.</p>
+            <h1>{'Вход в систему'}</h1>
+            <p>{'Доступ к функциям возможен только после авторизации.'}</p>
+          </div>
+          <div className="hero-card">
+            <div className="stat">
+              <span>{'Безопасность'}</span>
+              <strong>{'Локально'}</strong>
+            </div>
+            <div className="stat">
+              <span>{'Сессии'}</span>
+              <strong>{'Защищены'}</strong>
+            </div>
           </div>
         </header>
 
-        <main className="grid">
-          <section className="panel auth">
+        <main className="grid auth-grid">
+          <section className="panel auth auth-panel">
             <div className="panel-head">
-              <h2>Локальный вход</h2>
+              <h2>{'Локальный вход'}</h2>
             </div>
             <div className="field">
-              <label>Логин</label>
+              <label>{'Логин'}</label>
               <input value={login} onChange={e => setLogin(e.target.value)} placeholder="admin1" />
             </div>
             <div className="field">
-              <label>Пароль</label>
-              <input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} placeholder="••••••" />
+              <label>{'Пароль'}</label>
+              <input type="password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} placeholder="??????" />
             </div>
             <div className="actions">
-              <button className="primary" onClick={handleLogin}>Войти</button>
+              <button className="primary" onClick={handleLogin}>{'Войти'}</button>
             </div>
             {loginErr && <div className="status error">{loginErr}</div>}
+          </section>
+          <section className="panel auth-hint">
+            <h3>{'Что дальше'}</h3>
+            <p className="muted">{'После входа вы сможете добавить Telegram-аккаунты и управлять мониторингом.'}</p>
+            <div className="pill">{'Поддержка QR и 2FA'}</div>
           </section>
         </main>
       </div>
     )
   }
 
+
   return (
     <div className="page">
       <header className="hero">
         <div>
           <div className="eyebrow">TG Web Auth</div>
-          <h1>Панель управления аккаунтами, сессиями и воркером</h1>
-          <p>Светлая, быстрая и минималистичная. Realtime через polling (позже можно заменить на WebSocket).</p>
+          <h1>Панель управления</h1>
         </div>
         <div className="hero-card">
           <div className="stat">
@@ -527,24 +772,32 @@ export default function App() {
             <strong>{stats ? stats.queue_total : '—'}</strong>
           </div>
         </div>
-        <div className="actions">
-          <button className="ghost" onClick={handleLogout}>Выйти</button>
-        </div>
       </header>
 
-      <div className="tabs">
-        <button
-          className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setActiveTab('dashboard')}
-        >
-          Управление
-        </button>
-        <button
-          className={`tab ${activeTab === 'messages' ? 'active' : ''}`}
-          onClick={() => setActiveTab('messages')}
-        >
-          Сообщения
-        </button>
+      <div className="tabs tabs-row">
+        <div className="tabs-left">
+          <button
+            className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}
+          >
+            Управление
+          </button>
+          <button
+            className={`tab ${activeTab === 'messages' ? 'active' : ''}`}
+            onClick={() => setActiveTab('messages')}
+          >
+            Сообщения
+          </button>
+          {isAdmin && (
+            <button
+              className={`tab ${activeTab === 'admin' ? 'active' : ''}`}
+              onClick={() => setActiveTab('admin')}
+            >
+              Админ
+            </button>
+          )}
+        </div>
+        <button className="tab active tab-logout" onClick={handleLogout}>Выйти</button>
       </div>
 
       {activeTab === 'messages' && (
@@ -588,7 +841,7 @@ export default function App() {
                 {!groupsLoading && groupsErr && <div className="status error">{groupsErr}</div>}
                 {!groupsLoading && !groupsErr && selectedGroupId === null && (
                   <div className="list">
-                    {groups.map(item => (
+                    {sortedGroups.map(item => (
                       <button
                         key={`group-${item.id}`}
                         className={`row ${item.is_listening ? 'listening' : ''}`}
@@ -610,7 +863,7 @@ export default function App() {
                 {!groupsLoading && !groupsErr && selectedGroupId !== null && (
                   <div className="split split-compact">
                     <div className="list">
-                      {groups.map(item => (
+                      {sortedGroups.map(item => (
                         <button
                           key={`group-${item.id}`}
                           className={`row ${selectedGroupId === item.id ? 'active' : ''} ${item.is_listening ? 'listening' : ''}`}
@@ -637,15 +890,15 @@ export default function App() {
                       <div className="subcard">
                         <h3>Группа</h3>
                         <p className="muted">
-                          {(groups.find(g => g.id === selectedGroupId)?.title) || 'Без названия'}
+                          {(sortedGroups.find(g => g.id === selectedGroupId)?.title) || 'Без названия'}
                         </p>
                         <div className="actions">
                           <label className="toggle">
                             <input
                               type="checkbox"
-                              checked={!!groups.find(g => g.id === selectedGroupId)?.is_listening}
+                              checked={!!sortedGroups.find(g => g.id === selectedGroupId)?.is_listening}
                               onChange={e => {
-                                const group = groups.find(g => g.id === selectedGroupId)
+                                const group = sortedGroups.find(g => g.id === selectedGroupId)
                                 setGroupListening(group, e.target.checked)
                               }}
                             />
@@ -653,7 +906,7 @@ export default function App() {
                           </label>
                         </div>
                         {(() => {
-                          const group = groups.find(g => g.id === selectedGroupId)
+                          const group = sortedGroups.find(g => g.id === selectedGroupId)
                           if (!group || !group.is_listening) return null
                           const count = groupMatchCounts[selectedGroupId] || 0
                           return (
@@ -749,18 +1002,43 @@ export default function App() {
               <span>ID</span>
               <span>Тип</span>
               <span>Статус</span>
-              <span>Прогресс</span>
+              <span>Таргеты</span>
               <span>Действия</span>
             </div>
+            {listeningGroups.length > 0 && (
+              <div className="table-row">
+                <span>
+                  {activeAccountId && groupWorkerId
+                    ? `${activeAccountId}_${groupWorkerId}_GROUPS`
+                    : '—'}
+                </span>
+                <span>
+                  <span className="tag info">{jobTypeLabel('GROUP_LISTENER')}</span>
+                </span>
+                <span>
+                  <span className="tag success">Работает</span>
+                </span>
+                <span>
+                  {listeningGroups.map(item => item.title || `#${item.id}`).join(', ')}
+                </span>
+                <span className="row-actions">—</span>
+              </div>
+            )}
             {jobs.map(job => (
               <div className="table-row" key={job.id}>
                 <span>#{job.id}</span>
-                <span>{job.type}</span>
-                <span>{job.status}</span>
                 <span>
-                  <div className="progress">
-                    <div style={{ width: `${job.progress || 0}%` }} />
-                  </div>
+                  <span className="tag info">{jobTypeLabel(job.type)}</span>
+                </span>
+                <span>
+                  <span className={`tag ${jobStatusMeta(job.status).cls}`}>
+                    {jobStatusMeta(job.status).label}
+                  </span>
+                </span>
+                <span>
+                  {job.progress !== null && job.progress !== undefined
+                    ? `${job.progress || 0}%`
+                    : '—'}
                 </span>
                 <span className="row-actions">
                   <button className="danger" onClick={() => cancelJob(job.id)} disabled={job.status !== 'RUNNING' && job.status !== 'PENDING'}>
@@ -798,6 +1076,139 @@ export default function App() {
         </section>
 
       </main>
+      )}
+
+      {activeTab === 'admin' && (
+        <main className="grid">
+          <section className="panel">
+            <div className="panel-head">
+              <h2>Пользователи</h2>
+            </div>
+            <div className="field">
+              <label>Логин (email)</label>
+              <input value={adminLogin} onChange={e => setAdminLogin(e.target.value)} placeholder="user@example.com" />
+            </div>
+            <div className="field">
+              <label>Пароль</label>
+              <input type="password" value={adminPassword} onChange={e => setAdminPassword(e.target.value)} placeholder="••••••••" />
+            </div>
+            <div className="actions">
+              <label className="toggle">
+                <input type="checkbox" checked={adminIsAdmin} onChange={e => setAdminIsAdmin(e.target.checked)} />
+                <span>Админ</span>
+              </label>
+              <label className="toggle">
+                <input type="checkbox" checked={adminIsActive} onChange={e => setAdminIsActive(e.target.checked)} />
+                <span>Активен</span>
+              </label>
+              <button className="primary" onClick={createAdminUser}>Создать</button>
+            </div>
+            {adminErr && <div className="status error">{adminErr}</div>}
+            <div className="table">
+              <div className="table-head">
+                <span>ID</span>
+                <span>Логин</span>
+                <span>Роль</span>
+                <span>Статус</span>
+                <span>Действия</span>
+              </div>
+              {adminUsers.map(u => (
+                <div className="table-row" key={`u-${u.id}`}>
+                  <span>#{u.id}</span>
+                  <span>{u.login}</span>
+                  <span><span className={`tag ${u.is_admin ? 'info' : 'muted'}`}>{u.is_admin ? 'Админ' : 'Пользователь'}</span></span>
+                  <span><span className={`tag ${u.is_active ? 'success' : 'muted'}`}>{u.is_active ? 'Активен' : 'Отключён'}</span></span>
+                  <span className="row-actions">
+                    <button className="danger" onClick={() => deleteAdminUser(u.id)}>Удалить</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2>Telegram аккаунты</h2>
+            </div>
+            <div className="table">
+              <div className="table-head">
+                <span>ID</span>
+                <span>Имя</span>
+                <span>Владелец</span>
+                <span>Статус</span>
+                <span>Действия</span>
+              </div>
+              {adminAccounts.map(a => (
+                <div className="table-row" key={`a-${a.id}`}>
+                  <span>#{a.id}</span>
+                  <span>{a.display_name || 'Без имени'}</span>
+                  <span>{a.local_login || `#${a.local_user_id}`}</span>
+                  <span><span className={`tag ${a.is_active ? 'success' : 'muted'}`}>{a.is_active ? 'Активен' : 'Отключён'}</span></span>
+                  <span className="row-actions">
+                    <button className="danger" onClick={() => deleteAdminAccount(a.id)}>Удалить</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2>История воркеров</h2>
+            </div>
+            <div className="table">
+              <div className="table-head">
+                <span>ID</span>
+                <span>Аккаунт</span>
+                <span>Статус</span>
+                <span>Период</span>
+                <span>Ошибка</span>
+              </div>
+              {adminWorkers.map(w => (
+                <div className="table-row" key={`w-${w.id}`}>
+                  <span>#{w.id}</span>
+                  <span>{w.account_id}</span>
+                  <span><span className={`tag ${jobStatusMeta(w.status).cls}`}>{jobStatusMeta(w.status).label}</span></span>
+                  <span>{w.started_at}{w.stopped_at ? ` → ${w.stopped_at}` : ''}</span>
+                  <span className="muted">{w.last_error || '—'}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2>Прослушивания</h2>
+            </div>
+            <div className="actions">
+              <button
+                className="ghost"
+                disabled={adminMatchesOffset === 0}
+                onClick={() => setAdminMatchesOffset(prev => Math.max(0, prev - adminMatchesLimit))}
+              >
+                Назад
+              </button>
+              <button
+                className="ghost"
+                onClick={() => setAdminMatchesOffset(prev => prev + adminMatchesLimit)}
+              >
+                Дальше
+              </button>
+              <div className="pill">Сдвиг: {adminMatchesOffset}</div>
+              <div className="pill">Лимит: {adminMatchesLimit}</div>
+            </div>
+            <div className="log-list">
+              {adminMatches.map(m => (
+                <div className="log-item" key={`m-${m.id}`}>
+                  <span>{new Date(m.created_at).toLocaleString()}</span>
+                  <div>{m.message_text || '—'}</div>
+                  <div className="muted">Акк: {m.account_id} • Чат: {m.chat_id} • Msg: {m.message_id}</div>
+                </div>
+              ))}
+              {!adminMatches.length && <div className="muted">Пока ничего нет.</div>}
+            </div>
+          </section>
+        </main>
       )}
 
       {uiErr && <div className="toast">{uiErr}</div>}

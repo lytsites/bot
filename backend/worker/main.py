@@ -23,6 +23,8 @@ STATUS_RUNNING = "RUNNING"
 STATUS_DONE = "DONE"
 STATUS_FAILED = "FAILED"
 STATUS_CANCELLED = "CANCELLED"
+RUN_STATUS_RUNNING = "RUNNING"
+RUN_STATUS_STOPPED = "STOPPED"
 
 TYPE_CONNECT_CHECK = "connect_check"
 TYPE_SUBSCRIBE_EVENTS = "subscribe_events"
@@ -210,9 +212,14 @@ class Worker:
             try:
                 groups_by_account = self._load_active_group_listeners()
                 if not groups_by_account:
+                    self._stop_all_group_runs()
                     await self.client_manager.disconnect_all()
                     await asyncio.sleep(3.0)
                     continue
+                active_ids = set(groups_by_account.keys())
+                for account_id in active_ids:
+                    self._ensure_group_worker_run(account_id)
+                self._stop_inactive_group_runs(active_ids)
                 for account_id, group_rows in groups_by_account.items():
                     keywords = self._load_keywords_for_account(account_id)
                     if not keywords:
@@ -251,6 +258,53 @@ class Worker:
         for row in rows:
             grouped.setdefault(row["account_id"], []).append(dict(row))
         return grouped
+
+    def _ensure_group_worker_run(self, account_id: int) -> None:
+        with db() as con:
+            row = con.execute(
+                """
+                SELECT id FROM group_worker_runs
+                WHERE account_id=? AND status=?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (account_id, RUN_STATUS_RUNNING),
+            ).fetchone()
+            if row:
+                return
+            con.execute(
+                """
+                INSERT INTO group_worker_runs(account_id, status, started_at)
+                VALUES (?, ?, ?)
+                """,
+                (account_id, RUN_STATUS_RUNNING, now_iso()),
+            )
+
+    def _stop_inactive_group_runs(self, active_ids: set) -> None:
+        if not active_ids:
+            return
+        placeholders = ",".join("?" for _ in active_ids)
+        with db() as con:
+            con.execute(
+                f"""
+                UPDATE group_worker_runs
+                SET status=?, stopped_at=?
+                WHERE status=?
+                  AND account_id NOT IN ({placeholders})
+                """,
+                (RUN_STATUS_STOPPED, now_iso(), RUN_STATUS_RUNNING, *active_ids),
+            )
+
+    def _stop_all_group_runs(self) -> None:
+        with db() as con:
+            con.execute(
+                """
+                UPDATE group_worker_runs
+                SET status=?, stopped_at=?
+                WHERE status=?
+                """,
+                (RUN_STATUS_STOPPED, now_iso(), RUN_STATUS_RUNNING),
+            )
 
     def _load_keywords_for_account(self, account_id: int) -> List[str]:
         with db() as con:
