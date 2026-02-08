@@ -409,8 +409,13 @@ export default function App() {
 
   async function startAuth() {
     setAuthErr('')
+    const p = String(phone || '').trim()
+    if (!p) {
+      setAuthErr('Введите телефон')
+      return
+    }
     try {
-      const r = await authPost('/auth/start', { phone })
+      const r = await authPost('/auth/start', { phone: p })
       setAuthId(r.auth_id)
       setStatus(r.status)
     } catch (e) {
@@ -472,8 +477,17 @@ export default function App() {
 
   async function sendCode() {
     setAuthErr('')
+    const c = String(code || '').trim()
+    if (!authId) {
+      setAuthErr('Нет auth_id. Запусти авторизацию заново.')
+      return
+    }
+    if (!c) {
+      setAuthErr('Введите код')
+      return
+    }
     try {
-      const r = await authPost('/auth/code', { auth_id: authId, code })
+      const r = await authPost('/auth/code', { auth_id: authId, code: c })
       setStatus(r.status)
     } catch (e) {
       setAuthErr(formatError(e))
@@ -486,7 +500,14 @@ export default function App() {
     setQrSubmitting(true)
     try {
       const targetId = qrStatus === 'WAIT_PASSWORD' && qrAuthId ? qrAuthId : authId
-      const r = await authPost('/auth/password', { auth_id: targetId, password })
+      if (!targetId) {
+        throw new Error('AUTH_ID_REQUIRED')
+      }
+      const p = String(password || '')
+      if (!p.trim()) {
+        throw new Error('PASSWORD_REQUIRED')
+      }
+      const r = await authPost('/auth/password', { auth_id: targetId, password: p })
       if (targetId === qrAuthId) {
         setQrStatus(r.status)
       } else {

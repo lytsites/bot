@@ -35,21 +35,22 @@ def require_auth(request: Request) -> int:
 
 
 class StartReq(BaseModel):
-    phone: str
+    # Some clients may send null/empty; validate explicitly to avoid Telethon crashing.
+    phone: str | None = None
 
 
 class CodeReq(BaseModel):
-    auth_id: str
-    code: str
+    auth_id: str | None = None
+    code: str | None = None
 
 
 class PassReq(BaseModel):
-    auth_id: str
-    password: str
+    auth_id: str | None = None
+    password: str | None = None
 
 
 class CancelReq(BaseModel):
-    auth_id: str
+    auth_id: str | None = None
 
 
 class QrStartReq(BaseModel):
@@ -57,11 +58,11 @@ class QrStartReq(BaseModel):
 
 
 class QrRefreshReq(BaseModel):
-    auth_id: str
+    auth_id: str | None = None
 
 
 class QrContinueReq(BaseModel):
-    auth_id: str
+    auth_id: str | None = None
 
 
 @app.get("/health")
@@ -74,8 +75,11 @@ def health(request: Request):
 @app.post("/auth/start")
 def start(req: StartReq, request: Request):
     user_id = require_auth(request)
+    phone = (req.phone or "").strip()
+    if not phone:
+        raise HTTPException(400, "PHONE_REQUIRED")
     try:
-        return telegram_auth.start_auth(req.phone, user_id)
+        return telegram_auth.start_auth(phone, user_id)
     except Exception as e:
         logger.exception("start failed")
         raise HTTPException(400, f"START_FAILED: {type(e).__name__}: {e}")
@@ -84,8 +88,14 @@ def start(req: StartReq, request: Request):
 @app.post("/auth/code")
 def code(req: CodeReq, request: Request):
     require_auth(request)
+    auth_id = (req.auth_id or "").strip()
+    code = (req.code or "").strip()
+    if not auth_id:
+        raise HTTPException(400, "AUTH_ID_REQUIRED")
+    if not code:
+        raise HTTPException(400, "CODE_REQUIRED")
     try:
-        return telegram_auth.submit_code(req.auth_id, req.code)
+        return telegram_auth.submit_code(auth_id, code)
     except KeyError:
         raise HTTPException(404, "AUTH_NOT_FOUND")
     except Exception as e:
@@ -96,9 +106,15 @@ def code(req: CodeReq, request: Request):
 @app.post("/auth/password")
 def password(req: PassReq, request: Request):
     require_auth(request)
+    auth_id = (req.auth_id or "").strip()
+    password = (req.password or "")
+    if not auth_id:
+        raise HTTPException(400, "AUTH_ID_REQUIRED")
+    if not str(password).strip():
+        raise HTTPException(400, "PASSWORD_REQUIRED")
     try:
-        logger.info("password endpoint auth_id=%s", req.auth_id)
-        return telegram_auth.submit_password(req.auth_id, req.password)
+        logger.info("password endpoint auth_id=%s", auth_id)
+        return telegram_auth.submit_password(auth_id, password)
     except KeyError:
         raise HTTPException(404, "AUTH_NOT_FOUND")
     except Exception as e:
@@ -127,8 +143,11 @@ def cancel(auth_id: str, request: Request):
 @app.post("/auth/cancel")
 def cancel_body(req: CancelReq, request: Request):
     require_auth(request)
+    auth_id = (req.auth_id or "").strip()
+    if not auth_id:
+        raise HTTPException(400, "AUTH_ID_REQUIRED")
     try:
-        return telegram_auth.cancel_auth(req.auth_id)
+        return telegram_auth.cancel_auth(auth_id)
     except KeyError:
         raise HTTPException(404, "AUTH_NOT_FOUND")
 
@@ -146,8 +165,11 @@ def qr_start(req: QrStartReq, request: Request):
 @app.post("/auth/qr/refresh")
 def qr_refresh(req: QrRefreshReq, request: Request):
     require_auth(request)
+    auth_id = (req.auth_id or "").strip()
+    if not auth_id:
+        raise HTTPException(400, "AUTH_ID_REQUIRED")
     try:
-        return telegram_auth.refresh_qr_auth(req.auth_id)
+        return telegram_auth.refresh_qr_auth(auth_id)
     except KeyError:
         raise HTTPException(404, "AUTH_NOT_FOUND")
     except Exception as e:
@@ -158,8 +180,11 @@ def qr_refresh(req: QrRefreshReq, request: Request):
 @app.post("/auth/qr/continue")
 def qr_continue(req: QrContinueReq, request: Request):
     require_auth(request)
+    auth_id = (req.auth_id or "").strip()
+    if not auth_id:
+        raise HTTPException(400, "AUTH_ID_REQUIRED")
     try:
-        return telegram_auth.continue_qr_auth(req.auth_id)
+        return telegram_auth.continue_qr_auth(auth_id)
     except KeyError:
         raise HTTPException(404, "AUTH_NOT_FOUND")
     except Exception as e:

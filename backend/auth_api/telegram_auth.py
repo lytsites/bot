@@ -181,9 +181,13 @@ def _is_account_busy(con, account_id: int) -> bool:
     return row is not None
 
 
-def start_auth(phone: str, local_user_id: int) -> dict:
+def start_auth(phone: str | None, local_user_id: int) -> dict:
     if not TG_API_ID or not TG_API_HASH:
         raise RuntimeError("TG_API_ID/TG_API_HASH not set")
+
+    phone = (phone or "").strip()
+    if not phone:
+        raise ValueError("PHONE_REQUIRED")
 
     auth_id = str(uuid.uuid4())
     enc_empty = encrypt_text("")
@@ -239,6 +243,12 @@ def start_auth(phone: str, local_user_id: int) -> dict:
 
 
 def submit_code(auth_id: str, code: str) -> dict:
+    auth_id = (auth_id or "").strip()
+    code = (code or "").strip()
+    if not auth_id:
+        raise ValueError("AUTH_ID_REQUIRED")
+    if not code:
+        raise ValueError("CODE_REQUIRED")
     async def _run():
         with db() as con:
             row = con.execute(
@@ -343,6 +353,11 @@ def submit_code(auth_id: str, code: str) -> dict:
 
 
 def submit_password(auth_id: str, password: str) -> dict:
+    auth_id = (auth_id or "").strip()
+    if not auth_id:
+        raise ValueError("AUTH_ID_REQUIRED")
+    if password is None or not str(password).strip():
+        raise ValueError("PASSWORD_REQUIRED")
     async def _run_code(row):
         phone = row["phone"]
         session_string = decrypt_text(row["temp_session"])
