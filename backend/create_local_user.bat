@@ -2,6 +2,7 @@
 setlocal
 
 set "HERE=%~dp0"
+cd /d "%HERE%"
 
 REM Usage examples:
 REM   backend\create_local_user.bat --login user1 --password pass123 --role user

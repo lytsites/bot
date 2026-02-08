@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from telethon import TelegramClient
 from telethon import events
 from telethon.errors import FloodWaitError
+from telethon.errors.rpcerrorlist import AuthKeyUnregisteredError
 from telethon.sessions import StringSession
 
 from common.config import TG_API_HASH, TG_API_ID
@@ -84,6 +85,15 @@ class ClientManager:
 
         client = TelegramClient(StringSession(session_string), TG_API_ID, TG_API_HASH)
         await client.connect()
+        # Validate auth key early so loops don't spam errors on every request.
+        try:
+            await client.get_me()
+        except AuthKeyUnregisteredError:
+            await client.disconnect()
+            self._revoke_active_sessions(account_id)
+            if account_id in self._clients:
+                self._clients.pop(account_id, None)
+            raise RuntimeError("SESSION_INVALID")
         self._clients[account_id] = ClientState(session_string=session_string, client=client)
         return client
 
@@ -109,6 +119,14 @@ class ClientManager:
         if not row:
             return None
         return decrypt_text(row["session_string"])
+
+    @staticmethod
+    def _revoke_active_sessions(account_id: int) -> None:
+        with db() as con:
+            con.execute(
+                "UPDATE tg_sessions SET revoked_at=? WHERE account_id=? AND revoked_at IS NULL",
+                (now_iso(), account_id),
+            )
 
 
 class Worker:
