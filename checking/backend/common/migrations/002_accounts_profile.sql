@@ -1,6 +1,0 @@
-BEGIN;
-
-ALTER TABLE accounts ADD COLUMN user_id INTEGER;
-ALTER TABLE accounts ADD COLUMN username TEXT;
-
-COMMIT;

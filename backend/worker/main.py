@@ -102,6 +102,16 @@ class ClientManager:
             await state.client.disconnect()
         self._clients.clear()
 
+    async def invalidate_session(self, account_id: int) -> None:
+        """Drop in-memory client and revoke active session(s) in DB for this account."""
+        state = self._clients.pop(account_id, None)
+        if state:
+            try:
+                await state.client.disconnect()
+            except Exception:
+                pass
+        self._revoke_active_sessions(account_id)
+
     @staticmethod
     def _load_active_session(account_id: int) -> Optional[str]:
         with db() as con:
@@ -880,7 +890,12 @@ class Worker:
                 # If cache covers all needed ids, reuse
                 if ids.issubset(mapping.keys()):
                     return mapping
-        mapping = await self._build_dialog_map(client, ids)
+        try:
+            mapping = await self._build_dialog_map(client, ids)
+        except AuthKeyUnregisteredError:
+            # Session is invalid/revoked on Telegram side. Mark it revoked locally and skip this account.
+            await self.client_manager.invalidate_session(account_id)
+            return {}
         if mapping:
             self._dialog_cache[account_id] = (datetime.utcnow(), mapping)
         return mapping
@@ -888,6 +903,8 @@ class Worker:
     async def _build_dialog_map(self, client: TelegramClient, ids: set) -> Dict[int, object]:
         try:
             dialogs = await client.get_dialogs(limit=300)
+        except AuthKeyUnregisteredError:
+            raise
         except FloodWaitError as e:
             logger.info("Flood wait on get_dialogs: %ss", e.seconds)
             await asyncio.sleep(min(e.seconds, 30))
