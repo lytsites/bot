@@ -10,3 +10,4 @@ logs/
 *.sqlite3
 *.db
 *.log.*
+.gguf

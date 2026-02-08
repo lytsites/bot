@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE accounts ADD COLUMN tags TEXT;
+
+COMMIT;

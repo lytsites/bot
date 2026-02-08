@@ -1,17 +1,32 @@
 from datetime import datetime, timedelta
+import os
 import asyncio
 from typing import Optional
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from common.auth import create_session, hash_password, revoke_token, verify_token
 from common.config import FRONTEND_ORIGINS, TG_API_HASH, TG_API_ID
 from common.crypto import decrypt_text
 from common.db import db, init_db
+from common.users import (
+    ROLE_ADMIN,
+    ROLE_SUPER_ADMIN,
+    ROLE_USER,
+    can_create_admins,
+    can_delete_target,
+    create_local_user,
+    get_user_role,
+    role_to_str,
+)
 from common.logging_setup import get_logger, request_id_middleware, setup_logging
 from telethon import TelegramClient
+from telethon.errors import UsernameInvalidError, UsernameNotOccupiedError
+from telethon.tl.types import User
 from telethon.sessions import StringSession
 
 
@@ -36,11 +51,31 @@ def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
 
+AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002").rstrip("/")
+
+
 @app.get("/health")
 def health(request: Request):
     require_auth(request)
     logger.info("health")
     return {"ok": True}
+
+
+@app.get("/ai/status")
+def ai_status(request: Request, probe: bool = Query(False)):
+    require_auth(request)
+    try:
+        r = httpx.get(
+            f"{AI_API_URL}/ai/health",
+            params={"probe": "true" if probe else "false"},
+            timeout=4.0,
+        )
+        if r.status_code >= 400:
+            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:500]}"}
+        data = r.json()
+        return {"ok": True, **data}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 class LoginReq(BaseModel):
@@ -52,20 +87,31 @@ class LoginReq(BaseModel):
 def local_login(req: LoginReq):
     password_hash = hash_password(req.password)
     with db() as con:
-        row = con.execute(
-            """
-            SELECT id, is_active, is_admin FROM local_users
-            WHERE login=? AND password_hash=?
-            """,
-            (req.login, password_hash),
-        ).fetchone()
+        try:
+            row = con.execute(
+                """
+                SELECT id, is_active, is_admin, role FROM local_users
+                WHERE login=? AND password_hash=?
+                """,
+                (req.login, password_hash),
+            ).fetchone()
+        except Exception:
+            row = con.execute(
+                """
+                SELECT id, is_active, is_admin FROM local_users
+                WHERE login=? AND password_hash=?
+                """,
+                (req.login, password_hash),
+            ).fetchone()
     if not row or row["is_active"] != 1:
         raise HTTPException(401, "BAD_CREDENTIALS")
     session = create_session(row["id"])
+    role = int(row["role"] or (1 if row["is_admin"] else 0)) if "role" in row.keys() else (1 if row["is_admin"] else 0)
     return {
         "token": session["token"],
         "expires_at": session["expires_at"],
-        "is_admin": bool(row["is_admin"]),
+        "is_admin": bool(row["is_admin"]) or role >= ROLE_ADMIN,
+        "is_super_admin": role >= ROLE_SUPER_ADMIN,
     }
 
 
@@ -81,18 +127,66 @@ def local_logout(request: Request):
 def local_me(request: Request):
     user_id = require_auth(request)
     with db() as con:
-        row = con.execute(
-            "SELECT id, login, is_admin, is_active, created_at FROM local_users WHERE id=?",
-            (user_id,),
-        ).fetchone()
+        try:
+            row = con.execute(
+                "SELECT id, login, is_admin, role, is_active, created_at FROM local_users WHERE id=?",
+                (user_id,),
+            ).fetchone()
+        except Exception:
+            row = con.execute(
+                "SELECT id, login, is_admin, is_active, created_at FROM local_users WHERE id=?",
+                (user_id,),
+            ).fetchone()
     if not row:
         raise HTTPException(404, "USER_NOT_FOUND")
-    return dict(row)
+    d = dict(row)
+    role = int(d.get("role") or (1 if d.get("is_admin") else 0))
+    d["role"] = role_to_str(role)
+    d["is_admin"] = bool(d.get("is_admin")) or role >= ROLE_ADMIN
+    d["is_super_admin"] = role >= ROLE_SUPER_ADMIN
+    return d
 
 
 class SettingsReq(BaseModel):
     keywords: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+class AutoChatUsernamesReq(BaseModel):
+    usernames: list[str]
+
+
+class AutoChatSettingsReq(BaseModel):
+    ai_instruction: Optional[str] = None
+    greeting_examples: Optional[str] = None
+    delay_enabled: Optional[bool] = None
+    delay_min_ms: Optional[int] = Field(default=None, ge=0, le=60 * 60 * 1000)
+    delay_max_ms: Optional[int] = Field(default=None, ge=0, le=60 * 60 * 1000)
+    typing_enabled: Optional[bool] = None
+    read_enabled: Optional[bool] = None
+
+
+class AutoChatStartReq(BaseModel):
+    tg_user_ids: list[int]
+
+
+class AutoChatStopReq(BaseModel):
+    dialog_id: int
+
+
+AUTO_CHAT_STATUS_STARTING = "STARTING"
+AUTO_CHAT_STATUS_WAIT_REPLY = "WAIT_REPLY"
+AUTO_CHAT_STATUS_ACTIVE = "ACTIVE"
+AUTO_CHAT_STATUS_STOPPED = "STOPPED"
+AUTO_CHAT_STATUS_ERROR = "ERROR"
+
+AUTO_CHAT_ACTIVE_STATUSES = (
+    AUTO_CHAT_STATUS_STARTING,
+    AUTO_CHAT_STATUS_WAIT_REPLY,
+    AUTO_CHAT_STATUS_ACTIVE,
+)
+
+AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT = int(os.getenv("AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT", "10"))
 
 
 @app.get("/local/settings")
@@ -135,6 +229,424 @@ def update_settings(req: SettingsReq, request: Request):
     return {"ok": True}
 
 
+def _normalize_username(value: str) -> str:
+    if not value:
+        return ""
+    return value.strip().lstrip("@").lower()
+
+
+@app.get("/local/auto_chat/usernames")
+def list_auto_chat_usernames(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT id, username, created_at, tg_user_id, display_name, status
+            FROM local_user_auto_chat_usernames
+            WHERE user_id=?
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
+@app.post("/local/auto_chat/usernames")
+def add_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
+    user_id = require_auth(request)
+    usernames = [_normalize_username(u) for u in (req.usernames or [])]
+    usernames = [u for u in usernames if u]
+    usernames = list(dict.fromkeys(usernames))
+    if not usernames:
+        return {"ok": True}
+    account_id, session_string = _get_active_account_session(user_id)
+    if not account_id or not session_string:
+        raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
+
+    async def _resolve():
+        client = TelegramClient(StringSession(session_string), TG_API_ID, TG_API_HASH)
+        await client.connect()
+        results = []
+        try:
+            for username in usernames:
+                try:
+                    ent = await client.get_entity(username)
+                    if isinstance(ent, User):
+                        name = " ".join([p for p in [ent.first_name, ent.last_name] if p]) or ""
+                        results.append(
+                            {
+                                "username": username,
+                                "tg_user_id": ent.id,
+                                "display_name": name,
+                                "status": "OK",
+                            }
+                        )
+                    else:
+                        title = getattr(ent, "title", "") or ""
+                        ent_id = getattr(ent, "id", None)
+                        results.append(
+                            {
+                                "username": username,
+                                "tg_user_id": ent_id,
+                                "display_name": title,
+                                "status": "NOT_USER",
+                            }
+                        )
+                except (UsernameInvalidError, UsernameNotOccupiedError):
+                    results.append(
+                        {
+                            "username": username,
+                            "tg_user_id": None,
+                            "display_name": None,
+                            "status": "NOT_FOUND",
+                        }
+                    )
+                except Exception:
+                    results.append(
+                        {
+                            "username": username,
+                            "tg_user_id": None,
+                            "display_name": None,
+                            "status": "NOT_FOUND",
+                        }
+                    )
+            return results
+        finally:
+            await client.disconnect()
+
+    try:
+        import asyncio
+        resolved = asyncio.run(_resolve())
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+        resolved = loop.run_until_complete(_resolve())
+
+    now = now_iso()
+    with db() as con:
+        for item in resolved:
+            con.execute(
+                """
+                INSERT INTO local_user_auto_chat_usernames(user_id, username, created_at, tg_user_id, display_name, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, username) DO UPDATE SET
+                    tg_user_id=excluded.tg_user_id,
+                    display_name=excluded.display_name,
+                    status=excluded.status
+                """,
+                (
+                    user_id,
+                    item["username"],
+                    now,
+                    item["tg_user_id"],
+                    item["display_name"],
+                    item["status"],
+                ),
+            )
+    return {"ok": True}
+
+
+@app.post("/local/auto_chat/usernames/delete")
+def delete_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
+    user_id = require_auth(request)
+    usernames = [_normalize_username(u) for u in (req.usernames or [])]
+    usernames = [u for u in usernames if u]
+    if not usernames:
+        return {"ok": True}
+    placeholders = ",".join(["?"] * len(usernames))
+    with db() as con:
+        con.execute(
+            f"""
+            DELETE FROM local_user_auto_chat_usernames
+            WHERE user_id=? AND username IN ({placeholders})
+            """,
+            (user_id, *usernames),
+        )
+    return {"ok": True}
+
+
+@app.post("/local/auto_chat/usernames/clear")
+def clear_auto_chat_usernames(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        con.execute(
+            "DELETE FROM local_user_auto_chat_usernames WHERE user_id=?",
+            (user_id,),
+        )
+    return {"ok": True}
+
+
+@app.get("/local/auto_chat/settings")
+def get_auto_chat_settings(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        row = con.execute(
+            """
+            SELECT ai_instruction, greeting_examples,
+                   delay_enabled, delay_min_ms, delay_max_ms, typing_enabled, read_enabled,
+                   created_at, updated_at
+            FROM local_user_auto_chat_settings
+            WHERE user_id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        if not row:
+            now = now_iso()
+            con.execute(
+                """
+                INSERT OR IGNORE INTO local_user_auto_chat_settings(user_id, ai_instruction, greeting_examples, created_at, updated_at)
+                VALUES (?, '', '', ?, ?)
+                """,
+                (user_id, now, now),
+            )
+            row = con.execute(
+                """
+                SELECT ai_instruction, greeting_examples,
+                       delay_enabled, delay_min_ms, delay_max_ms, typing_enabled, read_enabled,
+                       created_at, updated_at
+                FROM local_user_auto_chat_settings
+                WHERE user_id=?
+                """,
+                (user_id,),
+            ).fetchone()
+    return dict(row)
+
+
+@app.patch("/local/auto_chat/settings")
+def update_auto_chat_settings(req: AutoChatSettingsReq, request: Request):
+    user_id = require_auth(request)
+    fields = []
+    values = []
+    if req.ai_instruction is not None:
+        fields.append("ai_instruction=?")
+        values.append(req.ai_instruction)
+    if req.greeting_examples is not None:
+        fields.append("greeting_examples=?")
+        values.append(req.greeting_examples)
+    if req.delay_enabled is not None:
+        fields.append("delay_enabled=?")
+        values.append(1 if req.delay_enabled else 0)
+    if req.delay_min_ms is not None:
+        fields.append("delay_min_ms=?")
+        values.append(int(req.delay_min_ms))
+    if req.delay_max_ms is not None:
+        fields.append("delay_max_ms=?")
+        values.append(int(req.delay_max_ms))
+    if req.typing_enabled is not None:
+        fields.append("typing_enabled=?")
+        values.append(1 if req.typing_enabled else 0)
+    if req.read_enabled is not None:
+        fields.append("read_enabled=?")
+        values.append(1 if req.read_enabled else 0)
+
+    # Normalize delay bounds if both provided.
+    if req.delay_min_ms is not None and req.delay_max_ms is not None:
+        if int(req.delay_min_ms) > int(req.delay_max_ms):
+            raise HTTPException(400, "DELAY_MIN_GT_MAX")
+    if not fields:
+        return {"ok": True}
+    values.append(now_iso())
+    values.append(user_id)
+    with db() as con:
+        con.execute(
+            f"UPDATE local_user_auto_chat_settings SET {', '.join(fields)}, updated_at=? WHERE user_id=?",
+            values,
+        )
+    return {"ok": True}
+
+
+@app.get("/auto_chat/dialogs")
+def list_auto_chat_dialogs(request: Request):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        return {"account_id": None, "limit": AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT, "active_count": 0, "items": []}
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT id, account_id, peer_tg_user_id, peer_username, peer_display_name,
+                   status, last_error, pending_incoming, last_ai_request_at, last_ai_latency_ms,
+                   created_at, updated_at, started_at, stopped_at
+            FROM auto_chat_dialogs
+            WHERE account_id=?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (account_id,),
+        ).fetchall()
+        active_count = con.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM auto_chat_dialogs
+            WHERE account_id=? AND status IN ({",".join(["?"]*len(AUTO_CHAT_ACTIVE_STATUSES))})
+            """,
+            (account_id, *AUTO_CHAT_ACTIVE_STATUSES),
+        ).fetchone()["cnt"]
+    return {
+        "account_id": account_id,
+        "limit": AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT,
+        "active_count": active_count,
+        "items": [dict(r) for r in rows],
+    }
+
+
+@app.get("/auto_chat/dialogs/{dialog_id}/messages")
+def list_auto_chat_messages(
+    dialog_id: int,
+    request: Request,
+    limit: int = Query(200, ge=1, le=2000),
+    since: Optional[str] = Query(None),
+    after_id: Optional[int] = Query(None, ge=0),
+):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
+    with db() as con:
+        row = con.execute(
+            "SELECT id FROM auto_chat_dialogs WHERE id=? AND account_id=?",
+            (dialog_id, account_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "DIALOG_NOT_FOUND")
+        where = ["dialog_id=?"]
+        params: list[object] = [dialog_id]
+        if since:
+            where.append("created_at>=?")
+            params.append(since)
+        if after_id is not None:
+            where.append("id>?")
+            params.append(int(after_id))
+
+        if after_id is not None:
+            # Incremental: return in ascending order for easy append.
+            rows = con.execute(
+                f"""
+                SELECT id, direction, text, tg_message_id, created_at
+                FROM auto_chat_messages
+                WHERE {' AND '.join(where)}
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        else:
+            # Initial load: grab last N and reverse to chronological.
+            rows = con.execute(
+                f"""
+                SELECT id, direction, text, tg_message_id, created_at
+                FROM auto_chat_messages
+                WHERE {' AND '.join(where)}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+    items = [dict(r) for r in rows]
+    if after_id is None:
+        items.reverse()
+    return {"dialog_id": dialog_id, "items": items}
+
+
+@app.post("/auto_chat/dialogs/start")
+def start_auto_chat(req: AutoChatStartReq, request: Request):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
+    tg_ids = [int(x) for x in (req.tg_user_ids or []) if int(x) > 0]
+    tg_ids = list(dict.fromkeys(tg_ids))
+    if not tg_ids:
+        return {"ok": True, "started": 0}
+
+    now = now_iso()
+    with db() as con:
+        active_count = con.execute(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM auto_chat_dialogs
+            WHERE account_id=? AND status IN ({",".join(["?"]*len(AUTO_CHAT_ACTIVE_STATUSES))})
+            """,
+            (account_id, *AUTO_CHAT_ACTIVE_STATUSES),
+        ).fetchone()["cnt"]
+
+        available = max(0, AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT - int(active_count))
+        if available <= 0:
+            raise HTTPException(400, "AUTO_CHAT_LIMIT_REACHED")
+
+        to_start = tg_ids[:available]
+
+        # Map metadata from saved usernames (optional).
+        meta_rows = con.execute(
+            f"""
+            SELECT username, tg_user_id, display_name
+            FROM local_user_auto_chat_usernames
+            WHERE user_id=? AND tg_user_id IN ({",".join(["?"]*len(to_start))})
+            """,
+            (user_id, *to_start),
+        ).fetchall()
+        meta = {r["tg_user_id"]: r for r in meta_rows}
+
+        started = 0
+        for peer_id in to_start:
+            m = meta.get(peer_id)
+            username = m["username"] if m else None
+            display_name = m["display_name"] if m else None
+            con.execute(
+                """
+                INSERT INTO auto_chat_dialogs(
+                    account_id, peer_tg_user_id, peer_username, peer_display_name,
+                    status, last_error, pending_incoming, created_at, updated_at, started_at
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?)
+                ON CONFLICT(account_id, peer_tg_user_id) DO UPDATE SET
+                    peer_username=COALESCE(excluded.peer_username, auto_chat_dialogs.peer_username),
+                    peer_display_name=COALESCE(excluded.peer_display_name, auto_chat_dialogs.peer_display_name),
+                    status=excluded.status,
+                    last_error=NULL,
+                    pending_incoming=0,
+                    updated_at=excluded.updated_at,
+                    started_at=excluded.started_at,
+                    stopped_at=NULL
+                """,
+                (
+                    account_id,
+                    peer_id,
+                    username,
+                    display_name,
+                    AUTO_CHAT_STATUS_STARTING,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            started += 1
+    return {"ok": True, "started": started, "limit": AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT}
+
+
+@app.post("/auto_chat/dialogs/stop")
+def stop_auto_chat(req: AutoChatStopReq, request: Request):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
+    now = now_iso()
+    with db() as con:
+        row = con.execute(
+            "SELECT id FROM auto_chat_dialogs WHERE id=? AND account_id=?",
+            (req.dialog_id, account_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "DIALOG_NOT_FOUND")
+        con.execute(
+            """
+            UPDATE auto_chat_dialogs
+            SET status=?, stopped_at=?, updated_at=?, pending_incoming=0
+            WHERE id=? AND account_id=?
+            """,
+            (AUTO_CHAT_STATUS_STOPPED, now, now, req.dialog_id, account_id),
+        )
+    return {"ok": True}
+
+
 class AccountCreateReq(BaseModel):
     display_name: str
     phone: Optional[str] = None
@@ -161,6 +673,12 @@ class GroupListenReq(BaseModel):
 
 class GroupMatchesReq(BaseModel):
     messages: list[str]
+
+class RequisitesFilter(BaseModel):
+    requisite_type: Optional[str] = None
+    country: Optional[str] = None
+    limit: int = Query(100, ge=1, le=1000)
+    offset: int = Query(0, ge=0)
 
 
 @app.get("/accounts")
@@ -751,18 +1269,26 @@ def require_auth(request: Request) -> int:
 def require_admin(request: Request) -> int:
     user_id = require_auth(request)
     with db() as con:
-        row = con.execute(
-            "SELECT is_admin FROM local_users WHERE id=?",
-            (user_id,),
-        ).fetchone()
-    if not row or row["is_admin"] != 1:
+        role = get_user_role(con, user_id)
+    if role < ROLE_ADMIN:
         raise HTTPException(403, "ADMIN_ONLY")
+    return user_id
+
+
+def require_super_admin(request: Request) -> int:
+    user_id = require_auth(request)
+    with db() as con:
+        role = get_user_role(con, user_id)
+    if role < ROLE_SUPER_ADMIN:
+        raise HTTPException(403, "SUPER_ADMIN_ONLY")
     return user_id
 
 
 class AdminUserCreateReq(BaseModel):
     login: str
     password: str
+    # Backward-compatible: UI used to pass is_admin. Now role is preferred.
+    role: Optional[str] = None  # "user" | "admin"
     is_admin: Optional[bool] = False
     is_active: Optional[bool] = True
 
@@ -771,60 +1297,81 @@ class AdminUserCreateReq(BaseModel):
 def admin_list_users(request: Request):
     require_admin(request)
     with db() as con:
-        rows = con.execute(
-            """
-            SELECT id, login, is_admin, is_active, created_at, updated_at
-            FROM local_users
-            ORDER BY id DESC
-            """,
-        ).fetchall()
-    return {"items": [dict(r) for r in rows]}
+        try:
+            rows = con.execute(
+                """
+                SELECT id, login, is_admin, role, is_active, created_at, updated_at
+                FROM local_users
+                ORDER BY id DESC
+                """,
+            ).fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                role = int(d.get("role") or (1 if d.get("is_admin") else 0))
+                d["role"] = role_to_str(role)
+                d["is_admin"] = bool(d.get("is_admin")) or role >= ROLE_ADMIN
+                d["is_super_admin"] = role >= ROLE_SUPER_ADMIN
+                items.append(d)
+            return {"items": items}
+        except Exception:
+            rows = con.execute(
+                """
+                SELECT id, login, is_admin, is_active, created_at, updated_at
+                FROM local_users
+                ORDER BY id DESC
+                """,
+            ).fetchall()
+            return {"items": [dict(r) for r in rows]}
 
 
 @app.post("/admin/users")
 def admin_create_user(req: AdminUserCreateReq, request: Request):
-    require_admin(request)
+    actor_id = require_admin(request)
     if not req.login or not req.password:
         raise HTTPException(400, "MISSING_FIELDS")
     password_hash = hash_password(req.password)
+    desired_role = ROLE_USER
+    if req.role:
+        if req.role.strip().lower() not in ("user", "admin"):
+            raise HTTPException(400, "INVALID_ROLE")
+        desired_role = ROLE_ADMIN if req.role.strip().lower() == "admin" else ROLE_USER
+    elif req.is_admin:
+        desired_role = ROLE_ADMIN
+
+    if desired_role == ROLE_ADMIN:
+        with db() as con:
+            actor_role = get_user_role(con, actor_id)
+        if not can_create_admins(actor_role):
+            raise HTTPException(403, "SUPER_ADMIN_ONLY")
+
     with db() as con:
         try:
-            con.execute(
-                """
-                INSERT INTO local_users(login, password_hash, is_active, is_admin, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    req.login,
-                    password_hash,
-                    1 if req.is_active else 0,
-                    1 if req.is_admin else 0,
-                    now_iso(),
-                    now_iso(),
-                ),
+            user_id = create_local_user(
+                con,
+                login=req.login,
+                password_hash=password_hash,
+                role=desired_role,
+                is_active=bool(req.is_active),
             )
         except Exception as e:
             raise HTTPException(400, f"CREATE_FAILED: {type(e).__name__}: {e}")
-        user_row = con.execute("SELECT last_insert_rowid() AS id").fetchone()
-        con.execute(
-            """
-            INSERT OR IGNORE INTO local_user_settings(user_id, keywords, is_active, created_at, updated_at)
-            VALUES (?, '', 1, ?, ?)
-            """,
-            (user_row["id"], now_iso(), now_iso()),
-        )
-    return {"id": user_row["id"]}
+    return {"id": user_id}
 
 
 @app.delete("/admin/users/{user_id}")
 def admin_delete_user(user_id: int, request: Request, confirm: bool = Query(False)):
-    require_admin(request)
+    actor_id = require_admin(request)
     if not confirm:
         raise HTTPException(400, "CONFIRM_REQUIRED")
     with db() as con:
         owner = con.execute("SELECT id FROM local_users WHERE id=?", (user_id,)).fetchone()
         if not owner:
             raise HTTPException(404, "USER_NOT_FOUND")
+        actor_role = get_user_role(con, actor_id)
+        target_role = get_user_role(con, user_id)
+        if not can_delete_target(actor_role, target_role):
+            raise HTTPException(403, "FORBIDDEN")
         account_rows = con.execute(
             "SELECT id FROM accounts WHERE local_user_id=?",
             (user_id,),
@@ -839,9 +1386,16 @@ def admin_delete_user(user_id: int, request: Request, confirm: bool = Query(Fals
             con.execute("DELETE FROM group_matches WHERE account_id=?", (account_id,))
             con.execute("DELETE FROM group_catalog WHERE account_id=?", (account_id,))
             con.execute("DELETE FROM group_worker_runs WHERE account_id=?", (account_id,))
+            con.execute(
+                "DELETE FROM auto_chat_messages WHERE dialog_id IN (SELECT id FROM auto_chat_dialogs WHERE account_id=?)",
+                (account_id,),
+            )
+            con.execute("DELETE FROM auto_chat_dialogs WHERE account_id=?", (account_id,))
             con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
         con.execute("DELETE FROM local_sessions WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM local_user_settings WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM local_user_auto_chat_usernames WHERE user_id=?", (user_id,))
+        con.execute("DELETE FROM local_user_auto_chat_settings WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM local_users WHERE id=?", (user_id,))
     return {"ok": True}
 
@@ -880,6 +1434,11 @@ def admin_delete_account(account_id: int, request: Request, confirm: bool = Quer
         con.execute("DELETE FROM group_matches WHERE account_id=?", (account_id,))
         con.execute("DELETE FROM group_catalog WHERE account_id=?", (account_id,))
         con.execute("DELETE FROM group_worker_runs WHERE account_id=?", (account_id,))
+        con.execute(
+            "DELETE FROM auto_chat_messages WHERE dialog_id IN (SELECT id FROM auto_chat_dialogs WHERE account_id=?)",
+            (account_id,),
+        )
+        con.execute("DELETE FROM auto_chat_dialogs WHERE account_id=?", (account_id,))
         con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
     return {"ok": True}
 
@@ -935,6 +1494,79 @@ def admin_group_matches(
             f"""
             SELECT id, account_id, chat_id, message_id, message_text, sender_phone, created_at
             FROM group_matches
+            {where}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.get("/requisites")
+def list_requisites(
+    request: Request,
+    requisite_type: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    user_id = require_auth(request)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        return {"items": []}
+    params = [account_id]
+    filters = ["account_id=?"]
+    if requisite_type:
+        filters.append("requisite_type=?")
+        params.append(requisite_type)
+    if country:
+        filters.append("country=?")
+        params.append(country)
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with db() as con:
+        rows = con.execute(
+            f"""
+            SELECT id, account_id, chat_id, dialog_id, message_id, message_text,
+                   sender_phone, sender_username, requisite_type, country, value, created_at
+            FROM requisites
+            {where}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.get("/admin/requisites")
+def admin_list_requisites(
+    request: Request,
+    account_id: Optional[int] = None,
+    requisite_type: Optional[str] = Query(None),
+    country: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    require_admin(request)
+    params = []
+    filters = []
+    if account_id is not None:
+        filters.append("account_id=?")
+        params.append(account_id)
+    if requisite_type:
+        filters.append("requisite_type=?")
+        params.append(requisite_type)
+    if country:
+        filters.append("country=?")
+        params.append(country)
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with db() as con:
+        rows = con.execute(
+            f"""
+            SELECT id, account_id, chat_id, dialog_id, message_id, message_text,
+                   sender_phone, sender_username, requisite_type, country, value, created_at
+            FROM requisites
             {where}
             ORDER BY id DESC
             LIMIT ? OFFSET ?

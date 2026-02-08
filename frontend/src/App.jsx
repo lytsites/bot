@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   authGet,
   authPost,
@@ -9,6 +9,9 @@ import {
   mainPost,
   setAuthToken,
 } from './api'
+import HomeTab from './tabs/HomeTab'
+import MonitoringTab from './tabs/MonitoringTab'
+import SettingsTab from './tabs/SettingsTab'
 import './styles.css'
 
 export default function App() {
@@ -33,15 +36,54 @@ export default function App() {
   const [jobs, setJobs] = useState([])
   const [stats, setStats] = useState(null)
   const [activeAccountId, setActiveAccountId] = useState(null)
+  const [aiStatus, setAiStatus] = useState({ ok: null, provider: '', deepseek_ok: null, deepseek_error: '', error: '' })
 
   const [uiErr, setUiErr] = useState('')
+  const [toasts, setToasts] = useState([])
+  const toastIdRef = useRef(1)
+  const toastTimersRef = useRef(new Map())
   const [loggedIn, setLoggedIn] = useState(!!getAuthToken())
   const [login, setLogin] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
   const [loginErr, setLoginErr] = useState('')
   const [authModalOpen, setAuthModalOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState('dashboard')
+  const [activeTopTab, setActiveTopTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('activeTopTab')
+      return saved || 'home'
+    } catch {
+      return 'home'
+    }
+  })
+  const [homeSideTab, setHomeSideTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('homeSideTab')
+      return saved || 'listening'
+    } catch {
+      return 'listening'
+    }
+  })
+  const [monitorSideTab, setMonitorSideTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('monitorSideTab')
+      return saved || 'listening'
+    } catch {
+      return 'listening'
+    }
+  })
+  const [settingsSideTab, setSettingsSideTab] = useState(() => {
+    try {
+      const saved = localStorage.getItem('settingsSideTab')
+      return saved || 'main'
+    } catch {
+      return 'main'
+    }
+  })
   const [isAdmin, setIsAdmin] = useState(false)
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false)
+  const [isAdminChecked, setIsAdminChecked] = useState(false)
+  const [meLogin, setMeLogin] = useState('')
+  const [meRole, setMeRole] = useState('user')
   const [keywords, setKeywords] = useState('')
   const [settingsActive, setSettingsActive] = useState(true)
   const [settingsErr, setSettingsErr] = useState('')
@@ -49,7 +91,6 @@ export default function App() {
   const [groupsErr, setGroupsErr] = useState('')
   const [groupsLoading, setGroupsLoading] = useState(false)
   const [selectedGroupId, setSelectedGroupId] = useState(null)
-  const [messagesTab, setMessagesTab] = useState('groups')
   const [groupMatchCounts, setGroupMatchCounts] = useState({})
   const [groupWorkerId, setGroupWorkerId] = useState(null)
   const [groupWorkers, setGroupWorkers] = useState([])
@@ -70,6 +111,53 @@ export default function App() {
   const [adminIsAdmin, setAdminIsAdmin] = useState(false)
   const [adminIsActive, setAdminIsActive] = useState(true)
   const [adminErr, setAdminErr] = useState('')
+  const [isDarkTheme, setIsDarkTheme] = useState(() => {
+    try {
+      return localStorage.getItem('theme') === 'dark'
+    } catch {
+      return false
+    }
+  })
+  const [autoChatInput, setAutoChatInput] = useState('')
+  const [autoChatUsernames, setAutoChatUsernames] = useState([])
+  const [autoChatSelected, setAutoChatSelected] = useState([])
+  const [autoChatErr, setAutoChatErr] = useState('')
+  const [autoChatLoading, setAutoChatLoading] = useState(false)
+  const [autoChatAiInstruction, setAutoChatAiInstruction] = useState('')
+  const [autoChatGreetingExamples, setAutoChatGreetingExamples] = useState('')
+  const [autoChatDelayEnabled, setAutoChatDelayEnabled] = useState(false)
+  const [autoChatDelayMinSec, setAutoChatDelayMinSec] = useState('0')
+  const [autoChatDelayMaxSec, setAutoChatDelayMaxSec] = useState('0')
+  const [autoChatTypingEnabled, setAutoChatTypingEnabled] = useState(false)
+  const [autoChatReadEnabled, setAutoChatReadEnabled] = useState(false)
+  const [autoChatSettingsErr, setAutoChatSettingsErr] = useState('')
+  const [autoChatSettingsLoading, setAutoChatSettingsLoading] = useState(false)
+  const [homeAutoChatUsernames, setHomeAutoChatUsernames] = useState([])
+  const [homeAutoChatErr, setHomeAutoChatErr] = useState('')
+  const [homeAutoChatLoading, setHomeAutoChatLoading] = useState(false)
+  const [homeAutoChatActive, setHomeAutoChatActive] = useState(null)
+  const [homeAutoChatDialogs, setHomeAutoChatDialogs] = useState([])
+  const [homeAutoChatDialogsMeta, setHomeAutoChatDialogsMeta] = useState({
+    account_id: null,
+    limit: 10,
+    active_count: 0,
+  })
+  const [homeAutoChatDialogsErr, setHomeAutoChatDialogsErr] = useState('')
+  const [homeAutoChatDialogsLoading, setHomeAutoChatDialogsLoading] = useState(false)
+  const [homeAutoChatSelected, setHomeAutoChatSelected] = useState([])
+  const [homeAutoChatMessages, setHomeAutoChatMessages] = useState([])
+  const [homeAutoChatMessagesErr, setHomeAutoChatMessagesErr] = useState('')
+  const [homeAutoChatMessagesLoading, setHomeAutoChatMessagesLoading] = useState(false)
+  const homeAutoChatLastMessageIdRef = useRef(null)
+  const [homeAutoChatHistoryActive, setHomeAutoChatHistoryActive] = useState(null)
+  const [homeAutoChatHistoryMessages, setHomeAutoChatHistoryMessages] = useState([])
+  const [homeAutoChatHistoryMessagesErr, setHomeAutoChatHistoryMessagesErr] = useState('')
+  const [homeAutoChatHistoryMessagesLoading, setHomeAutoChatHistoryMessagesLoading] = useState(false)
+  const homeAutoChatHistoryLastMessageIdRef = useRef(null)
+
+  const [homeRequisites, setHomeRequisites] = useState([])
+  const [homeRequisitesErr, setHomeRequisitesErr] = useState('')
+  const [homeRequisitesLoading, setHomeRequisitesLoading] = useState(false)
 
   const listeningGroups = useMemo(
     () => groups.filter(item => item.is_listening),
@@ -145,6 +233,56 @@ export default function App() {
     return raw
   }
 
+  const aiStatusText = () => {
+    if (aiStatus?.ok !== true) return 'Ошибка'
+    if (aiStatus?.deepseek_ok === false) return 'Ошибка'
+    if (aiStatus?.deepseek_ok === true) return 'OK'
+    return 'Проверка'
+  }
+
+  const removeToast = id => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+    const tm = toastTimersRef.current.get(id)
+    if (tm) clearTimeout(tm)
+    toastTimersRef.current.delete(id)
+  }
+
+  const pushToast = (type, title, message, ttlMs = 3500) => {
+    const id = toastIdRef.current++
+    const item = {
+      id,
+      type: type || 'info',
+      title: title || '',
+      message: message || '',
+    }
+    setToasts(prev => {
+      const next = [...prev, item]
+      return next.length > 5 ? next.slice(next.length - 5) : next
+    })
+    const tm = setTimeout(() => removeToast(id), ttlMs)
+    toastTimersRef.current.set(id, tm)
+  }
+
+  useEffect(() => {
+    return () => {
+      for (const tm of toastTimersRef.current.values()) {
+        try {
+          clearTimeout(tm)
+        } catch {
+        }
+      }
+      toastTimersRef.current.clear()
+    }
+  }, [])
+
+  const isSameData = (a, b) => {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b)
+    } catch {
+      return false
+    }
+  }
+
   const jobTypeLabel = type => {
     switch ((type || '').toUpperCase()) {
       case 'GROUP_LISTENER':
@@ -165,9 +303,23 @@ export default function App() {
   async function loadMe() {
     try {
       const r = await mainGet('/local/me')
-      setIsAdmin(r.is_admin === 1 || r.is_admin === true)
+      const admin = r.is_admin === 1 || r.is_admin === true || r.is_admin === '1'
+      const superAdmin =
+        r.is_super_admin === 1 ||
+        r.is_super_admin === true ||
+        r.is_super_admin === '1' ||
+        (typeof r.role === 'string' && r.role.toLowerCase() === 'superadmin')
+      setIsAdmin(Boolean(admin || superAdmin))
+      setIsSuperAdmin(Boolean(superAdmin))
+      setMeLogin(String(r.login || ''))
+      setMeRole(typeof r.role === 'string' ? r.role.toLowerCase() : (superAdmin ? 'superadmin' : admin ? 'admin' : 'user'))
     } catch {
       setIsAdmin(false)
+      setIsSuperAdmin(false)
+      setMeLogin('')
+      setMeRole('user')
+    } finally {
+      setIsAdminChecked(true)
     }
   }
 
@@ -197,7 +349,7 @@ export default function App() {
       const r = await mainPost('/admin/users', {
         login: adminLogin,
         password: adminPassword,
-        is_admin: adminIsAdmin,
+        role: adminIsAdmin ? 'admin' : 'user',
         is_active: adminIsActive,
       })
       if (r?.id) {
@@ -205,10 +357,15 @@ export default function App() {
         setAdminPassword('')
         setAdminIsAdmin(false)
         setAdminIsActive(true)
+        pushToast('success', 'Создано', `Локальный аккаунт создан (ID: ${r.id})`)
+      } else {
+        pushToast('success', 'Создано', 'Локальный аккаунт создан')
       }
       await loadAdminUsers()
     } catch (e) {
-      setAdminErr(formatError(e))
+      const msg = formatError(e)
+      setAdminErr(msg)
+      pushToast('error', 'Ошибка', msg, 6000)
     }
   }
 
@@ -221,8 +378,11 @@ export default function App() {
       await loadAdminAccounts()
       await loadAdminWorkers()
       await loadAdminMatches()
+      pushToast('success', 'Удалено', `Локальный аккаунт удален (ID: ${userId})`)
     } catch (e) {
-      setAdminErr(formatError(e))
+      const msg = formatError(e)
+      setAdminErr(msg)
+      pushToast('error', 'Ошибка', msg, 6000)
     }
   }
 
@@ -234,8 +394,11 @@ export default function App() {
       await loadAdminAccounts()
       await loadAdminWorkers()
       await loadAdminMatches()
+      pushToast('success', 'Удалено', `Telegram-аккаунт удален (ID: ${accountId})`)
     } catch (e) {
-      setAdminErr(formatError(e))
+      const msg = formatError(e)
+      setAdminErr(msg)
+      pushToast('error', 'Ошибка', msg, 6000)
     }
   }
 
@@ -375,12 +538,28 @@ export default function App() {
   async function loadJobs(accountId) {
     const path = accountId ? `/jobs?account_id=${accountId}` : '/jobs'
     const r = await mainGet(path)
-    setJobs(r.items || [])
+    const next = r.items || []
+    setJobs(prev => (isSameData(prev, next) ? prev : next))
   }
 
   async function loadStats() {
     const r = await mainGet('/stats')
-    setStats(r)
+    setStats(prev => (isSameData(prev, r) ? prev : r))
+  }
+
+  async function loadAiStatus() {
+    try {
+      const r = await mainGet('/ai/status?probe=true')
+      setAiStatus({
+        ok: Boolean(r?.ok),
+        provider: String(r?.provider || ''),
+        deepseek_ok: r?.deepseek_ok ?? null,
+        deepseek_error: String(r?.deepseek_error || ''),
+        error: r?.error ? String(r.error) : '',
+      })
+    } catch (e) {
+      setAiStatus({ ok: false, provider: '', deepseek_ok: false, deepseek_error: '', error: formatError(e) })
+    }
   }
 
   async function loadSettings() {
@@ -491,7 +670,299 @@ export default function App() {
   async function loadActiveSession() {
     const r = await mainGet('/sessions/active')
     const first = (r.items || [])[0]
-    setActiveAccountId(first ? first.account_id : null)
+    const nextId = first ? first.account_id : null
+    setActiveAccountId(prev => (prev === nextId ? prev : nextId))
+  }
+
+  const parseUsernames = value =>
+    (value || '')
+      .split(/\r?\n/)
+      .map(item => item.trim())
+      .filter(Boolean)
+      .map(item => item.replace(/^@+/, '').toLowerCase())
+      .filter(Boolean)
+
+  async function loadAutoChatUsernames() {
+    setAutoChatErr('')
+    setAutoChatLoading(true)
+    try {
+      const r = await mainGet('/local/auto_chat/usernames')
+      const items = r.items || []
+      setAutoChatUsernames(items)
+      setAutoChatSelected([])
+    } catch (e) {
+      setAutoChatErr(formatError(e))
+      setAutoChatUsernames([])
+      setAutoChatSelected([])
+    } finally {
+      setAutoChatLoading(false)
+    }
+  }
+
+  async function loadHomeAutoChatUsernames() {
+    setHomeAutoChatErr('')
+    setHomeAutoChatLoading(true)
+    try {
+      const r = await mainGet('/local/auto_chat/usernames')
+      const items = (r.items || []).filter(item => item.status === 'OK')
+      setHomeAutoChatUsernames(items)
+    } catch (e) {
+      setHomeAutoChatErr(formatError(e))
+      setHomeAutoChatUsernames([])
+    } finally {
+      setHomeAutoChatLoading(false)
+    }
+  }
+
+  async function loadHomeAutoChatDialogs() {
+    setHomeAutoChatDialogsErr('')
+    setHomeAutoChatDialogsLoading(true)
+    try {
+      const r = await mainGet('/auto_chat/dialogs')
+      setHomeAutoChatDialogs(r.items || [])
+      setHomeAutoChatDialogsMeta({
+        account_id: r.account_id ?? null,
+        limit: r.limit ?? 10,
+        active_count: r.active_count ?? 0,
+      })
+    } catch (e) {
+      setHomeAutoChatDialogsErr(formatError(e))
+      setHomeAutoChatDialogs([])
+      setHomeAutoChatDialogsMeta({ account_id: null, limit: 10, active_count: 0 })
+    } finally {
+      setHomeAutoChatDialogsLoading(false)
+    }
+  }
+
+  async function startHomeAutoChat(tgUserIds) {
+    setHomeAutoChatDialogsErr('')
+    try {
+      const r = await mainPost('/auto_chat/dialogs/start', { tg_user_ids: tgUserIds })
+      setHomeAutoChatSelected([])
+      await loadHomeAutoChatDialogs()
+      const started = r?.started != null ? Number(r.started) : null
+      pushToast('success', 'Запущено', started != null ? `Диалогов: ${started}` : 'Диалоги запущены')
+    } catch (e) {
+      setHomeAutoChatDialogsErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function stopHomeAutoChat(dialogId) {
+    setHomeAutoChatDialogsErr('')
+    try {
+      await mainPost('/auto_chat/dialogs/stop', { dialog_id: dialogId })
+      await loadHomeAutoChatDialogs()
+      setHomeAutoChatMessages([])
+      setHomeAutoChatMessagesErr('')
+      setHomeAutoChatMessagesLoading(false)
+      if (homeAutoChatActive?.dialog_id === dialogId) {
+        setHomeAutoChatActive(null)
+      }
+      pushToast('success', 'Остановлено', 'Диалог остановлен')
+    } catch (e) {
+      setHomeAutoChatDialogsErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function loadHomeAutoChatMessages(dialogId, opts = {}) {
+    if (!dialogId) return
+    setHomeAutoChatMessagesErr('')
+    const incremental = opts.after_id != null
+    if (!incremental) setHomeAutoChatMessagesLoading(true)
+    try {
+      const limit = opts.limit ?? 200
+      const params = new URLSearchParams()
+      params.set('limit', String(limit))
+      if (opts.since) params.set('since', opts.since)
+      if (opts.after_id != null) params.set('after_id', String(opts.after_id))
+      const r = await mainGet(`/auto_chat/dialogs/${dialogId}/messages?${params.toString()}`)
+      if (opts.after_id != null) {
+        const incoming = r.items || []
+        if (incoming.length) {
+          setHomeAutoChatMessages(prev => {
+            const seen = new Set((prev || []).map(x => x.id))
+            const merged = [...(prev || [])]
+            for (const m of incoming) {
+              if (!seen.has(m.id)) merged.push(m)
+            }
+            homeAutoChatLastMessageIdRef.current = merged.length ? merged[merged.length - 1].id : null
+            return merged
+          })
+        }
+      } else {
+        const items = r.items || []
+        homeAutoChatLastMessageIdRef.current = items.length ? items[items.length - 1].id : null
+        setHomeAutoChatMessages(items)
+      }
+    } catch (e) {
+      setHomeAutoChatMessagesErr(formatError(e))
+      if (!incremental) {
+        homeAutoChatLastMessageIdRef.current = null
+        setHomeAutoChatMessages([])
+      }
+    } finally {
+      if (!incremental) setHomeAutoChatMessagesLoading(false)
+    }
+  }
+
+  async function loadHomeAutoChatHistoryMessages(dialogId, limit = 2000) {
+    if (!dialogId) return
+    setHomeAutoChatHistoryMessagesErr('')
+    setHomeAutoChatHistoryMessagesLoading(true)
+    try {
+      const r = await mainGet(`/auto_chat/dialogs/${dialogId}/messages?limit=${limit}`)
+      const items = r.items || []
+      homeAutoChatHistoryLastMessageIdRef.current = items.length ? items[items.length - 1].id : null
+      setHomeAutoChatHistoryMessages(items)
+    } catch (e) {
+      setHomeAutoChatHistoryMessagesErr(formatError(e))
+      homeAutoChatHistoryLastMessageIdRef.current = null
+      setHomeAutoChatHistoryMessages([])
+    } finally {
+      setHomeAutoChatHistoryMessagesLoading(false)
+    }
+  }
+
+  async function loadHomeRequisites() {
+    setHomeRequisitesErr('')
+    setHomeRequisitesLoading(true)
+    try {
+      const r = await mainGet('/requisites')
+      setHomeRequisites(r.items || [])
+    } catch (e) {
+      setHomeRequisitesErr(formatError(e))
+      setHomeRequisites([])
+    } finally {
+      setHomeRequisitesLoading(false)
+    }
+  }
+
+  async function pollHomeAutoChatIncremental(dialog) {
+    if (!dialog?.id) return
+    const lastId = homeAutoChatLastMessageIdRef.current
+    if (!lastId) return
+    await loadHomeAutoChatMessages(dialog.id, {
+      since: dialog.started_at || homeAutoChatActive?.started_at || null,
+      after_id: lastId,
+      limit: 200,
+    })
+  }
+
+  async function pollHomeAutoChatHistoryIncremental(dialogId) {
+    if (!dialogId) return
+    const lastId = homeAutoChatHistoryLastMessageIdRef.current
+    if (!lastId) return
+    setHomeAutoChatHistoryMessagesErr('')
+    try {
+      const r = await mainGet(`/auto_chat/dialogs/${dialogId}/messages?after_id=${lastId}&limit=500`)
+      const incoming = r.items || []
+      if (incoming.length) {
+        setHomeAutoChatHistoryMessages(prev => {
+          const seen = new Set((prev || []).map(x => x.id))
+          const merged = [...(prev || [])]
+          for (const m of incoming) {
+            if (!seen.has(m.id)) merged.push(m)
+          }
+          homeAutoChatHistoryLastMessageIdRef.current = merged.length ? merged[merged.length - 1].id : null
+          return merged
+        })
+      }
+    } catch (e) {
+      setHomeAutoChatHistoryMessagesErr(formatError(e))
+    }
+  }
+
+  async function saveAutoChatUsernames() {
+    setAutoChatErr('')
+    const list = parseUsernames(autoChatInput)
+    if (!list.length) {
+      setAutoChatErr('Введите хотя бы один юзернейм.')
+      return
+    }
+    try {
+      await mainPost('/local/auto_chat/usernames', { usernames: list })
+      setAutoChatInput('')
+      await loadAutoChatUsernames()
+      pushToast('success', 'Сохранено', `Добавлено: ${list.length}`)
+    } catch (e) {
+      setAutoChatErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function loadAutoChatSettings() {
+    setAutoChatSettingsErr('')
+    setAutoChatSettingsLoading(true)
+    try {
+      const r = await mainGet('/local/auto_chat/settings')
+      setAutoChatAiInstruction(r.ai_instruction || '')
+      setAutoChatGreetingExamples(r.greeting_examples || '')
+      setAutoChatDelayEnabled(Boolean(r.delay_enabled))
+      setAutoChatDelayMinSec(String(((r.delay_min_ms || 0) / 1000)).replace(/\.0+$/, ''))
+      setAutoChatDelayMaxSec(String(((r.delay_max_ms || 0) / 1000)).replace(/\.0+$/, ''))
+      setAutoChatTypingEnabled(Boolean(r.typing_enabled))
+      setAutoChatReadEnabled(Boolean(r.read_enabled))
+    } catch (e) {
+      setAutoChatSettingsErr(formatError(e))
+      setAutoChatAiInstruction('')
+      setAutoChatGreetingExamples('')
+      setAutoChatDelayEnabled(false)
+      setAutoChatDelayMinSec('0')
+      setAutoChatDelayMaxSec('0')
+      setAutoChatTypingEnabled(false)
+      setAutoChatReadEnabled(false)
+    } finally {
+      setAutoChatSettingsLoading(false)
+    }
+  }
+
+  async function saveAutoChatSettings() {
+    setAutoChatSettingsErr('')
+    try {
+      const minMs = Math.max(0, Math.round(parseFloat(autoChatDelayMinSec || '0') * 1000))
+      const maxMs = Math.max(0, Math.round(parseFloat(autoChatDelayMaxSec || '0') * 1000))
+      await mainPatch('/local/auto_chat/settings', {
+        ai_instruction: autoChatAiInstruction,
+        greeting_examples: autoChatGreetingExamples,
+        delay_enabled: autoChatDelayEnabled,
+        delay_min_ms: minMs,
+        delay_max_ms: maxMs,
+        typing_enabled: autoChatTypingEnabled,
+        read_enabled: autoChatReadEnabled,
+      })
+      pushToast('success', 'Сохранено', 'Настройки авто-общения обновлены')
+    } catch (e) {
+      setAutoChatSettingsErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function deleteAutoChatSelected() {
+    setAutoChatErr('')
+    if (!autoChatSelected.length) return
+    try {
+      await mainPost('/local/auto_chat/usernames/delete', { usernames: autoChatSelected })
+      await loadAutoChatUsernames()
+      pushToast('success', 'Удалено', `Юзернеймов: ${autoChatSelected.length}`)
+    } catch (e) {
+      setAutoChatErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function deleteAutoChatAll() {
+    setAutoChatErr('')
+    try {
+      await mainPost('/local/auto_chat/usernames/clear', {})
+      setAutoChatUsernames([])
+      setAutoChatSelected([])
+      pushToast('success', 'Удалено', 'Все юзернеймы удалены')
+    } catch (e) {
+      setAutoChatErr(formatError(e))
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
   }
 
   async function switchToSelectedAccount() {
@@ -513,6 +984,7 @@ export default function App() {
       await mainPost(`/accounts/${selectedId}/sessions/switch`, { session_id: target.id })
       await loadActiveSession()
       await loadAccounts()
+      pushToast('success', 'Готово', 'Сессия переключена')
     } catch (e) {
       setUiErr(formatError(e))
     }
@@ -530,6 +1002,7 @@ export default function App() {
       setSelectedId(null)
       await loadAccounts()
       await loadSessions(null)
+      pushToast('success', 'Удалено', 'Аккаунт удален')
     } catch (e) {
       setUiErr(formatError(e))
     }
@@ -547,6 +1020,7 @@ export default function App() {
       setActiveAccountId(null)
       await loadAccounts()
       await loadSessions(null)
+      pushToast('success', 'Удалено', 'Все аккаунты удалены')
     } catch (e) {
       setUiErr(formatError(e))
     }
@@ -558,6 +1032,7 @@ export default function App() {
     try {
       await mainPost(`/jobs/${jobId}/cancel`, {})
       await loadJobs(selectedId)
+      pushToast('success', 'Отменено', 'Задача отменена')
     } catch (e) {
       setUiErr(formatError(e))
     }
@@ -567,10 +1042,31 @@ export default function App() {
     if (!loggedIn) return
     loadAccounts().catch(e => setUiErr(formatError(e)))
     loadStats().catch(() => {})
+    loadAiStatus().catch(() => {})
     loadActiveSession().catch(() => {})
     loadSettings().catch(() => {})
     loadMe().catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    const id = setInterval(() => {
+      loadAiStatus().catch(() => {})
+    }, 15000)
+    return () => clearInterval(id)
+  }, [loggedIn])
+
+  useEffect(() => {
+    if (!uiErr) return
+    pushToast('error', 'Ошибка', uiErr, 6000)
+    setUiErr('')
+  }, [uiErr])
+
+  useEffect(() => {
+    if (!isSuperAdmin && adminIsAdmin) {
+      setAdminIsAdmin(false)
+    }
+  }, [isSuperAdmin, adminIsAdmin])
 
   useEffect(() => {
     if (!selectedAccount) {
@@ -590,6 +1086,13 @@ export default function App() {
 
   const qrStopped = ['READY', 'ERROR', 'CANCELLED', 'EXPIRED'].includes(qrStatus)
   const [lastAuthRefreshAt, setLastAuthRefreshAt] = useState(0)
+  const needsGroups =
+    (activeTopTab === 'home' && homeSideTab === 'listening') ||
+    (activeTopTab === 'monitoring' && monitorSideTab === 'listening')
+  const monitoringAdminView =
+    isAdmin &&
+    activeTopTab === 'monitoring' &&
+    ['admin-accounts', 'admin-workers', 'admin-listening'].includes(monitorSideTab)
 
   useEffect(() => {
     if (!qrAuthId || qrSubmitting || qrStopped) return
@@ -598,6 +1101,26 @@ export default function App() {
     }, 2000)
     return () => clearInterval(id)
   }, [qrAuthId, qrSubmitting, qrStopped])
+
+  useEffect(() => {
+    document.body.classList.toggle('theme-dark', isDarkTheme)
+    try {
+      localStorage.setItem('theme', isDarkTheme ? 'dark' : 'light')
+    } catch {
+    }
+  }, [isDarkTheme])
+
+  useEffect(() => {
+    const hasModal = authModalOpen || showMatchesModal
+    document.body.classList.toggle('modal-open', hasModal)
+  }, [authModalOpen, showMatchesModal])
+
+  useEffect(() => {
+    if (!isAdminChecked) return
+    if (isAdmin) return
+    if (!['admin-accounts', 'admin-workers', 'admin-listening'].includes(monitorSideTab)) return
+    setMonitorSideTab('listening')
+  }, [isAdminChecked, isAdmin, monitorSideTab])
 
   useEffect(() => {
     if (!loggedIn) return
@@ -609,10 +1132,10 @@ export default function App() {
     loadAccounts().catch(() => {})
     loadActiveSession().catch(() => {})
     loadStats().catch(() => {})
-    if (activeTab === 'messages' && messagesTab === 'groups') {
+    if (needsGroups) {
       loadGroups().catch(() => {})
     }
-  }, [status, qrStatus, loggedIn, activeTab, messagesTab, lastAuthRefreshAt])
+  }, [status, qrStatus, loggedIn, needsGroups, lastAuthRefreshAt])
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -626,33 +1149,137 @@ export default function App() {
 
   useEffect(() => {
     if (!loggedIn) return
-    if (activeTab !== 'messages') return
-    if (messagesTab === 'groups') {
-      loadGroups().catch(() => {})
-    }
-  }, [activeTab, activeAccountId, messagesTab])
+    if (!needsGroups) return
+    loadGroups().catch(() => {})
+  }, [loggedIn, activeAccountId, needsGroups])
 
   useEffect(() => {
-    if (!loggedIn || !isAdmin || activeTab !== 'admin') return
+    if (!loggedIn || !monitoringAdminView) return
     loadAdminUsers().catch(() => {})
     loadAdminAccounts().catch(() => {})
     loadAdminWorkers().catch(() => {})
     loadAdminMatches(adminMatchesOffset, adminMatchesLimit).catch(() => {})
-  }, [loggedIn, isAdmin, activeTab, adminMatchesOffset, adminMatchesLimit])
+  }, [loggedIn, monitoringAdminView, adminMatchesOffset, adminMatchesLimit])
 
   useEffect(() => {
     if (!loggedIn) return
     if (!activeAccountId) return
+    if (!needsGroups) return
     loadGroups().catch(() => {})
-  }, [activeAccountId, loggedIn])
+  }, [activeAccountId, loggedIn, needsGroups])
 
   useEffect(() => {
     if (!loggedIn) return
+    if (!needsGroups) return
     const id = setInterval(() => {
       loadGroups().catch(() => {})
     }, 10000)
     return () => clearInterval(id)
-  }, [loggedIn])
+  }, [loggedIn, needsGroups])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'settings') return
+    if (settingsSideTab !== 'auto') return
+    loadAutoChatUsernames().catch(() => {})
+    loadAutoChatSettings().catch(() => {})
+  }, [loggedIn, activeTopTab, settingsSideTab])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'home') return
+    if (homeSideTab === 'auto' || homeSideTab === 'auto_history') {
+      loadHomeAutoChatUsernames().catch(() => {})
+      loadHomeAutoChatDialogs().catch(() => {})
+    } else if (homeSideTab === 'requisites_history') {
+      loadHomeRequisites().catch(() => {})
+    } else {
+      setHomeAutoChatHistoryActive(null)
+      setHomeAutoChatHistoryMessages([])
+      setHomeAutoChatHistoryMessagesErr('')
+      setHomeAutoChatHistoryMessagesLoading(false)
+    }
+  }, [loggedIn, activeTopTab, homeSideTab])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'home') return
+    if (homeSideTab !== 'auto') return
+    if (!homeAutoChatActive?.tg_user_id && !homeAutoChatActive?.dialog_id) return
+
+    const dialog =
+      (homeAutoChatActive?.dialog_id
+        ? (homeAutoChatDialogs || []).find(d => d.id === homeAutoChatActive.dialog_id)
+        : null) ||
+      (homeAutoChatActive?.tg_user_id
+        ? (homeAutoChatDialogs || []).find(d => d.peer_tg_user_id === homeAutoChatActive.tg_user_id)
+        : null)
+
+    if (!dialog?.id) return
+    if (dialog.status === 'STOPPED') return
+
+    loadHomeAutoChatMessages(dialog.id, {
+      since: dialog.started_at || homeAutoChatActive?.started_at || null,
+      limit: 200,
+    }).catch(() => {})
+  }, [
+    loggedIn,
+    activeTopTab,
+    homeSideTab,
+    homeAutoChatActive?.dialog_id,
+    homeAutoChatActive?.tg_user_id,
+    homeAutoChatActive?.started_at,
+    homeAutoChatDialogs,
+  ])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'home') return
+    if (homeSideTab !== 'auto') return
+
+    const dialog =
+      (homeAutoChatActive?.dialog_id
+        ? (homeAutoChatDialogs || []).find(d => d.id === homeAutoChatActive.dialog_id)
+        : null) ||
+      (homeAutoChatActive?.tg_user_id
+        ? (homeAutoChatDialogs || []).find(d => d.peer_tg_user_id === homeAutoChatActive.tg_user_id)
+        : null)
+
+    if (!dialog?.id) return
+    if (dialog.status === 'STOPPED') return
+
+    const id = setInterval(() => {
+      pollHomeAutoChatIncremental(dialog).catch(() => {})
+    }, 1500)
+    return () => clearInterval(id)
+  }, [
+    loggedIn,
+    activeTopTab,
+    homeSideTab,
+    homeAutoChatActive?.dialog_id,
+    homeAutoChatActive?.tg_user_id,
+    homeAutoChatDialogs,
+  ])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'home') return
+    if (homeSideTab !== 'auto_history') return
+    if (!homeAutoChatHistoryActive?.dialog_id) return
+
+    const id = setInterval(() => {
+      pollHomeAutoChatHistoryIncremental(homeAutoChatHistoryActive.dialog_id).catch(() => {})
+    }, 2000)
+    return () => clearInterval(id)
+  }, [loggedIn, activeTopTab, homeSideTab, homeAutoChatHistoryActive?.dialog_id])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (activeTopTab !== 'home') return
+    if (homeSideTab !== 'auto_history') return
+    if (!homeAutoChatHistoryActive?.dialog_id) return
+    loadHomeAutoChatHistoryMessages(homeAutoChatHistoryActive.dialog_id, 2000).catch(() => {})
+  }, [loggedIn, activeTopTab, homeSideTab, homeAutoChatHistoryActive?.dialog_id])
 
   useEffect(() => {
     if (!showMatchesModal || !matchesGroup) return
@@ -663,6 +1290,40 @@ export default function App() {
     }, 3000)
     return () => clearInterval(id)
   }, [showMatchesModal, matchesGroup])
+
+  useEffect(() => {
+    const handler = () => resetAuthState()
+    window.addEventListener('auth:expired', handler)
+    return () => window.removeEventListener('auth:expired', handler)
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('activeTopTab', activeTopTab)
+    } catch {
+    }
+  }, [activeTopTab])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('homeSideTab', homeSideTab)
+    } catch {
+    }
+  }, [homeSideTab])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('monitorSideTab', monitorSideTab)
+    } catch {
+    }
+  }, [monitorSideTab])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('settingsSideTab', settingsSideTab)
+    } catch {
+    }
+  }, [settingsSideTab])
 
   async function handleLogin() {
     setLoginErr('')
@@ -680,25 +1341,253 @@ export default function App() {
     }
   }
 
+  const handleHomeSideTabChange = next => {
+    setHomeSideTab(next)
+    if (next !== 'listening') {
+      setSelectedGroupId(null)
+    } else {
+      loadGroups().catch(() => {})
+    }
+    if (next !== 'auto') {
+      setHomeAutoChatActive(null)
+      setHomeAutoChatSelected([])
+      setHomeAutoChatMessages([])
+      setHomeAutoChatMessagesErr('')
+      homeAutoChatLastMessageIdRef.current = null
+    }
+    if (next !== 'auto_history') {
+      setHomeAutoChatHistoryActive(null)
+      setHomeAutoChatHistoryMessages([])
+      setHomeAutoChatHistoryMessagesErr('')
+      setHomeAutoChatHistoryMessagesLoading(false)
+      homeAutoChatHistoryLastMessageIdRef.current = null
+    }
+    if (next !== 'requisites_history') {
+      setHomeRequisites([])
+      setHomeRequisitesErr('')
+      setHomeRequisitesLoading(false)
+    }
+  }
+
+  const handleMonitorSideTabChange = next => {
+    setMonitorSideTab(next)
+    if (next !== 'listening') {
+      setSelectedGroupId(null)
+    } else {
+      loadGroups().catch(() => {})
+    }
+  }
+
+  const handleSettingsSideTabChange = next => {
+    setSettingsSideTab(next)
+  }
+
+  function resetAuthState() {
+    setAuthToken('')
+    setLoggedIn(false)
+    setIsAdmin(false)
+    setIsSuperAdmin(false)
+    setMeLogin('')
+    setMeRole('user')
+    setAccounts([])
+    setSessions([])
+    setJobs([])
+    setStats(null)
+    setSelectedId(null)
+    setActiveAccountId(null)
+    setKeywords('')
+    setSettingsActive(true)
+    setSettingsErr('')
+    setActiveTopTab('home')
+    setHomeSideTab('listening')
+    setMonitorSideTab('listening')
+    setSettingsSideTab('main')
+    setAuthModalOpen(false)
+    setAutoChatInput('')
+    setAutoChatUsernames([])
+    setAutoChatSelected([])
+    setAutoChatErr('')
+    setAutoChatLoading(false)
+    setAutoChatAiInstruction('')
+    setAutoChatGreetingExamples('')
+    setAutoChatSettingsErr('')
+    setAutoChatSettingsLoading(false)
+    setHomeAutoChatUsernames([])
+    setHomeAutoChatErr('')
+    setHomeAutoChatLoading(false)
+    setHomeAutoChatActive(null)
+    setHomeAutoChatDialogs([])
+    setHomeAutoChatDialogsMeta({ account_id: null, limit: 10, active_count: 0 })
+    setHomeAutoChatDialogsErr('')
+    setHomeAutoChatDialogsLoading(false)
+    setHomeAutoChatSelected([])
+    setHomeAutoChatMessages([])
+    setHomeAutoChatMessagesErr('')
+    setHomeAutoChatMessagesLoading(false)
+  }
+
   async function handleLogout() {
     try {
       await mainPost('/local/logout', {}, true)
     } catch {
     } finally {
-      setAuthToken('')
-      setLoggedIn(false)
-      setIsAdmin(false)
-      setAccounts([])
-      setSessions([])
-      setJobs([])
-      setStats(null)
-      setSelectedId(null)
-      setActiveAccountId(null)
-      setKeywords('')
-      setSettingsActive(true)
-      setSettingsErr('')
-      setActiveTab('dashboard')
+      resetAuthState()
     }
+  }
+
+  const homeListeningProps = {
+    activeAccountId,
+    groupsLoading,
+    groupsErr,
+    sortedGroups,
+    selectedGroupId,
+    setSelectedGroupId,
+    groupMatchCounts,
+    setGroupListening,
+    openMatchesModal,
+  }
+
+  const monitoringListeningProps = {
+    listeningGroups,
+    activeAccountId,
+    groupWorkerId,
+    jobs,
+    jobTypeLabel,
+    jobStatusMeta,
+    cancelJob,
+  }
+
+  const adminAccountsProps = {
+    isSuperAdmin,
+    adminLogin,
+    setAdminLogin,
+    adminPassword,
+    setAdminPassword,
+    adminIsAdmin,
+    setAdminIsAdmin,
+    adminIsActive,
+    setAdminIsActive,
+    createAdminUser,
+    adminErr,
+    adminUsers,
+    deleteAdminUser,
+    adminAccounts,
+    deleteAdminAccount,
+  }
+
+  const adminWorkersProps = {
+    adminWorkers,
+    jobStatusMeta,
+  }
+
+  const adminListeningProps = {
+    adminMatches,
+    adminMatchesOffset,
+    adminMatchesLimit,
+    setAdminMatchesOffset,
+  }
+
+  const settingsAccountsProps = {
+    accounts,
+    selectedId,
+    setSelectedId,
+    activeAccountId,
+    switchToSelectedAccount,
+    deleteAccount,
+    deleteAllAccounts,
+    openAuthModal: () => setAuthModalOpen(true),
+  }
+
+  const settingsListeningProps = {
+    keywords,
+    settingsActive,
+    handleKeywordsChange,
+    handleActiveToggle,
+    settingsErr,
+  }
+
+  const homeAutoChatProps = {
+    homeAutoChatUsernames,
+    homeAutoChatErr,
+    homeAutoChatLoading,
+    homeAutoChatActive,
+    setHomeAutoChatActive,
+    homeAutoChatDialogs,
+    homeAutoChatDialogsMeta,
+    homeAutoChatDialogsErr,
+    homeAutoChatDialogsLoading,
+    homeAutoChatSelected,
+    setHomeAutoChatSelected,
+    homeAutoChatMessages,
+    homeAutoChatMessagesErr,
+    homeAutoChatMessagesLoading,
+    reload: async () => {
+      await loadHomeAutoChatUsernames()
+      await loadHomeAutoChatDialogs()
+    },
+    startHomeAutoChat,
+    stopHomeAutoChat,
+    loadHomeAutoChatMessages,
+  }
+
+  const homeAutoChatHistoryProps = {
+    homeAutoChatDialogs,
+    homeAutoChatDialogsMeta,
+    homeAutoChatDialogsErr,
+    homeAutoChatDialogsLoading,
+    homeAutoChatHistoryActive,
+    setHomeAutoChatHistoryActive,
+    homeAutoChatHistoryMessages,
+    homeAutoChatHistoryMessagesErr,
+    homeAutoChatHistoryMessagesLoading,
+    loadHomeAutoChatHistoryMessages,
+    reload: async () => {
+      await loadHomeAutoChatDialogs()
+    },
+  }
+
+  const homeRequisitesHistoryProps = {
+    homeRequisites,
+    homeRequisitesErr,
+    homeRequisitesLoading,
+    reload: async () => {
+      await loadHomeRequisites()
+    },
+  }
+
+  const settingsAutoChatProps = {
+    autoChatInput,
+    setAutoChatInput,
+    autoChatUsernames,
+    autoChatSelected,
+    setAutoChatSelected,
+    autoChatErr,
+    autoChatLoading,
+    saveAutoChatUsernames,
+    deleteAutoChatSelected,
+    deleteAutoChatAll,
+    autoChatAiInstruction,
+    setAutoChatAiInstruction,
+    autoChatGreetingExamples,
+    setAutoChatGreetingExamples,
+    autoChatDelayEnabled,
+    setAutoChatDelayEnabled,
+    autoChatDelayMinSec,
+    setAutoChatDelayMinSec,
+    autoChatDelayMaxSec,
+    setAutoChatDelayMaxSec,
+    autoChatTypingEnabled,
+    setAutoChatTypingEnabled,
+    autoChatReadEnabled,
+    setAutoChatReadEnabled,
+    autoChatSettingsErr,
+    autoChatSettingsLoading,
+    saveAutoChatSettings,
+  }
+
+  const themeProps = {
+    isDarkTheme,
+    onToggleTheme: setIsDarkTheme,
   }
 
   if (!loggedIn) {
@@ -759,17 +1648,16 @@ export default function App() {
           <h1>Панель управления</h1>
         </div>
         <div className="hero-card">
+          <div className="me-card">
+            <div className="me-name">{meLogin || '—'}</div>
+          </div>
           <div className="stat">
             <span>Аккаунты</span>
             <strong>{stats ? stats.accounts_total : '—'}</strong>
           </div>
           <div className="stat">
-            <span>Активные воркеры</span>
-            <strong>{stats ? stats.workers_active : '—'}</strong>
-          </div>
-          <div className="stat">
-            <span>Очередь</span>
-            <strong>{stats ? stats.queue_total : '—'}</strong>
+            <span>Статус ИИ</span>
+            <strong>{aiStatusText()}</strong>
           </div>
         </div>
       </header>
@@ -777,441 +1665,75 @@ export default function App() {
       <div className="tabs tabs-row">
         <div className="tabs-left">
           <button
-            className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setActiveTab('dashboard')}
+            className={`tab ${activeTopTab === 'home' ? 'active' : ''}`}
+            onClick={() => setActiveTopTab('home')}
           >
-            Управление
+            Главная
           </button>
           <button
-            className={`tab ${activeTab === 'messages' ? 'active' : ''}`}
-            onClick={() => setActiveTab('messages')}
+            className={`tab ${activeTopTab === 'monitoring' ? 'active' : ''}`}
+            onClick={() => setActiveTopTab('monitoring')}
           >
-            Сообщения
+            Мониторинг
           </button>
-          {isAdmin && (
-            <button
-              className={`tab ${activeTab === 'admin' ? 'active' : ''}`}
-              onClick={() => setActiveTab('admin')}
-            >
-              Админ
-            </button>
-          )}
+          <button
+            className={`tab ${activeTopTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTopTab('settings')}
+          >
+            Настройки
+          </button>
         </div>
         <button className="tab active tab-logout" onClick={handleLogout}>Выйти</button>
       </div>
 
-      {activeTab === 'messages' && (
-        <main className="grid">
-          <section className="panel">
-            <div className="panel-head">
-              <h2>Сообщения</h2>
-              <span className="muted">
-                {activeAccountId ? `Аккаунт #${activeAccountId}` : 'Нет активного аккаунта'}
-              </span>
-            </div>
-            <div className="subtabs">
-              <button
-                className={`subtab ${messagesTab === 'groups' ? 'active' : ''}`}
-                onClick={() => {
-                  setMessagesTab('groups')
-                  setSelectedGroupId(null)
-                  loadGroups().catch(() => {})
-                }}
-              >
-                Группы
-              </button>
-              <button
-                className={`subtab ${messagesTab === 'private' ? 'active' : ''}`}
-                onClick={() => {
-                  setMessagesTab('private')
-                  setSelectedGroupId(null)
-                }}
-              >
-                Личные
-              </button>
-            </div>
-
-            {messagesTab === 'private' && (
-              <p className="muted">Личные переписки пока не подключены.</p>
-            )}
-
-            {messagesTab === 'groups' && (
-              <>
-                {groupsLoading && <p className="muted">Загрузка...</p>}
-                {!groupsLoading && groupsErr && <div className="status error">{groupsErr}</div>}
-                {!groupsLoading && !groupsErr && selectedGroupId === null && (
-                  <div className="list">
-                    {sortedGroups.map(item => (
-                      <button
-                        key={`group-${item.id}`}
-                        className={`row ${item.is_listening ? 'listening' : ''}`}
-                        onClick={() => setSelectedGroupId(item.id)}
-                      >
-                        <div>
-                          <strong>{item.title || 'Без названия'}</strong>
-                          <span>#{item.id}</span>
-                        </div>
-                        <span className={`badge ${item.is_listening ? 'ok' : 'muted'}`}>
-                          {item.is_listening ? 'LISTENING' : 'OFF'}
-                        </span>
-                      </button>
-                    ))}
-                    {!groups.length && <div className="muted">Список пуст.</div>}
-                  </div>
-                )}
-
-                {!groupsLoading && !groupsErr && selectedGroupId !== null && (
-                  <div className="split split-compact">
-                    <div className="list">
-                      {sortedGroups.map(item => (
-                        <button
-                          key={`group-${item.id}`}
-                          className={`row ${selectedGroupId === item.id ? 'active' : ''} ${item.is_listening ? 'listening' : ''}`}
-                          onClick={() => {
-                            if (selectedGroupId === item.id) {
-                              setSelectedGroupId(null)
-                            } else {
-                              setSelectedGroupId(item.id)
-                            }
-                          }}
-                        >
-                          <div>
-                            <strong>{item.title || 'Без названия'}</strong>
-                            <span>#{item.id}</span>
-                          </div>
-                          <span className={`badge ${item.is_listening ? 'ok' : 'muted'}`}>
-                            {item.is_listening ? 'LISTENING' : 'OFF'}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="details">
-                      <div className="subcard">
-                        <h3>Группа</h3>
-                        <p className="muted">
-                          {(sortedGroups.find(g => g.id === selectedGroupId)?.title) || 'Без названия'}
-                        </p>
-                        <div className="actions">
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={!!sortedGroups.find(g => g.id === selectedGroupId)?.is_listening}
-                              onChange={e => {
-                                const group = sortedGroups.find(g => g.id === selectedGroupId)
-                                setGroupListening(group, e.target.checked)
-                              }}
-                            />
-                            <span>Слушать</span>
-                          </label>
-                        </div>
-                        {(() => {
-                          const group = sortedGroups.find(g => g.id === selectedGroupId)
-                          if (!group || !group.is_listening) return null
-                          const count = groupMatchCounts[selectedGroupId] || 0
-                          return (
-                            <div className="match-row">
-                              <span>Найдено: {count} сообщений</span>
-                              <button
-                                className="ghost"
-                                disabled={!count}
-                                onClick={() => openMatchesModal(group)}
-                              >
-                                Показать
-                              </button>
-                            </div>
-                          )
-                        })()}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </section>
-        </main>
+      {activeTopTab === 'home' && (
+        <HomeTab
+          activeSideTab={homeSideTab}
+          setActiveSideTab={handleHomeSideTabChange}
+          listeningProps={homeListeningProps}
+          autoChatProps={homeAutoChatProps}
+          autoChatHistoryProps={homeAutoChatHistoryProps}
+          requisitesHistoryProps={homeRequisitesHistoryProps}
+        />
       )}
 
-      {activeTab === 'dashboard' && (
-      <main className="grid">
-        <section className="panel auth">
-          <div className="panel-head">
-            <h2>Telegram</h2>
-          </div>
-          <p className="muted">Добавляйте аккаунты Telegram через отдельное окно авторизации.</p>
-          <div className="actions">
-            <button className="primary" onClick={() => setAuthModalOpen(true)}>Добавить аккаунт TG</button>
-          </div>
-        </section>
-
-        <section className="panel accounts">
-          <div className="panel-head">
-            <h2>Аккаунты</h2>
-          </div>
-
-          <div className="split">
-            <div className="list">
-              {accounts.map(acc => (
-                <button
-                  key={acc.id}
-                  className={`row ${selectedId === acc.id ? 'active' : ''}`}
-                  onClick={() => setSelectedId(acc.id)}
-                >
-                  <div>
-                    <strong>{acc.display_name || 'Без имени'}</strong>
-                    <span>{acc.phone || '—'}</span>
-                  </div>
-                  <span className={`badge ${acc.id === activeAccountId ? 'ok' : 'muted'}`}>
-                    {acc.id === activeAccountId ? 'ACTIVE' : 'INACTIVE'}
-                  </span>
-                </button>
-              ))}
-            </div>
-
-            <div className="details">
-              <div className="subcard">
-                <h3>Действия</h3>
-                <p className="muted">Активный аккаунт — только один. Сессии не удаляются при переключении.</p>
-                <div className="actions">
-                  <button
-                    className="primary"
-                    onClick={switchToSelectedAccount}
-                    disabled={!selectedId || selectedId === activeAccountId}
-                  >
-                    Переключиться
-                  </button>
-                  <button className="danger" onClick={deleteAccount} disabled={!selectedId}>
-                    Удалить аккаунт
-                  </button>
-                  <button className="danger" onClick={deleteAllAccounts} disabled={!accounts.length}>
-                    Удалить все
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel jobs">
-          <div className="panel-head">
-            <h2>Jobs / Worker</h2>
-            <span className="muted">Polling 3s</span>
-          </div>
-          <div className="table">
-            <div className="table-head">
-              <span>ID</span>
-              <span>Тип</span>
-              <span>Статус</span>
-              <span>Таргеты</span>
-              <span>Действия</span>
-            </div>
-            {listeningGroups.length > 0 && (
-              <div className="table-row">
-                <span>
-                  {activeAccountId && groupWorkerId
-                    ? `${activeAccountId}_${groupWorkerId}_GROUPS`
-                    : '—'}
-                </span>
-                <span>
-                  <span className="tag info">{jobTypeLabel('GROUP_LISTENER')}</span>
-                </span>
-                <span>
-                  <span className="tag success">Работает</span>
-                </span>
-                <span>
-                  {listeningGroups.map(item => item.title || `#${item.id}`).join(', ')}
-                </span>
-                <span className="row-actions">—</span>
-              </div>
-            )}
-            {jobs.map(job => (
-              <div className="table-row" key={job.id}>
-                <span>#{job.id}</span>
-                <span>
-                  <span className="tag info">{jobTypeLabel(job.type)}</span>
-                </span>
-                <span>
-                  <span className={`tag ${jobStatusMeta(job.status).cls}`}>
-                    {jobStatusMeta(job.status).label}
-                  </span>
-                </span>
-                <span>
-                  {job.progress !== null && job.progress !== undefined
-                    ? `${job.progress || 0}%`
-                    : '—'}
-                </span>
-                <span className="row-actions">
-                  <button className="danger" onClick={() => cancelJob(job.id)} disabled={job.status !== 'RUNNING' && job.status !== 'PENDING'}>
-                    Отменить
-                  </button>
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel settings">
-          <div className="panel-head">
-            <h2>Ключевые слова</h2>
-          </div>
-          <div className="field">
-            <label>Ключевые слова (через запятую)</label>
-            <input
-              value={keywords}
-              onChange={e => handleKeywordsChange(e.target.value)}
-              placeholder="пример: bitcoin, scam, airdrop"
-            />
-          </div>
-          <div className="actions">
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={settingsActive}
-                onChange={e => handleActiveToggle(e.target.checked)}
-              />
-              <span>Активно</span>
-            </label>
-          </div>
-          {settingsErr && <div className="status error">{settingsErr}</div>}
-        </section>
-
-      </main>
+      {activeTopTab === 'monitoring' && (
+        <MonitoringTab
+          isAdmin={isAdmin}
+          isSuperAdmin={isSuperAdmin}
+          activeSideTab={monitorSideTab}
+          setActiveSideTab={handleMonitorSideTabChange}
+          listeningProps={monitoringListeningProps}
+          adminAccountsProps={adminAccountsProps}
+          adminWorkersProps={adminWorkersProps}
+          adminListeningProps={adminListeningProps}
+        />
       )}
 
-      {activeTab === 'admin' && (
-        <main className="grid">
-          <section className="panel">
-            <div className="panel-head">
-              <h2>Пользователи</h2>
-            </div>
-            <div className="field">
-              <label>Логин (email)</label>
-              <input value={adminLogin} onChange={e => setAdminLogin(e.target.value)} placeholder="user@example.com" />
-            </div>
-            <div className="field">
-              <label>Пароль</label>
-              <input type="password" value={adminPassword} onChange={e => setAdminPassword(e.target.value)} placeholder="••••••••" />
-            </div>
-            <div className="actions">
-              <label className="toggle">
-                <input type="checkbox" checked={adminIsAdmin} onChange={e => setAdminIsAdmin(e.target.checked)} />
-                <span>Админ</span>
-              </label>
-              <label className="toggle">
-                <input type="checkbox" checked={adminIsActive} onChange={e => setAdminIsActive(e.target.checked)} />
-                <span>Активен</span>
-              </label>
-              <button className="primary" onClick={createAdminUser}>Создать</button>
-            </div>
-            {adminErr && <div className="status error">{adminErr}</div>}
-            <div className="table">
-              <div className="table-head">
-                <span>ID</span>
-                <span>Логин</span>
-                <span>Роль</span>
-                <span>Статус</span>
-                <span>Действия</span>
-              </div>
-              {adminUsers.map(u => (
-                <div className="table-row" key={`u-${u.id}`}>
-                  <span>#{u.id}</span>
-                  <span>{u.login}</span>
-                  <span><span className={`tag ${u.is_admin ? 'info' : 'muted'}`}>{u.is_admin ? 'Админ' : 'Пользователь'}</span></span>
-                  <span><span className={`tag ${u.is_active ? 'success' : 'muted'}`}>{u.is_active ? 'Активен' : 'Отключён'}</span></span>
-                  <span className="row-actions">
-                    <button className="danger" onClick={() => deleteAdminUser(u.id)}>Удалить</button>
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-head">
-              <h2>Telegram аккаунты</h2>
-            </div>
-            <div className="table">
-              <div className="table-head">
-                <span>ID</span>
-                <span>Имя</span>
-                <span>Владелец</span>
-                <span>Статус</span>
-                <span>Действия</span>
-              </div>
-              {adminAccounts.map(a => (
-                <div className="table-row" key={`a-${a.id}`}>
-                  <span>#{a.id}</span>
-                  <span>{a.display_name || 'Без имени'}</span>
-                  <span>{a.local_login || `#${a.local_user_id}`}</span>
-                  <span><span className={`tag ${a.is_active ? 'success' : 'muted'}`}>{a.is_active ? 'Активен' : 'Отключён'}</span></span>
-                  <span className="row-actions">
-                    <button className="danger" onClick={() => deleteAdminAccount(a.id)}>Удалить</button>
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-head">
-              <h2>История воркеров</h2>
-            </div>
-            <div className="table">
-              <div className="table-head">
-                <span>ID</span>
-                <span>Аккаунт</span>
-                <span>Статус</span>
-                <span>Период</span>
-                <span>Ошибка</span>
-              </div>
-              {adminWorkers.map(w => (
-                <div className="table-row" key={`w-${w.id}`}>
-                  <span>#{w.id}</span>
-                  <span>{w.account_id}</span>
-                  <span><span className={`tag ${jobStatusMeta(w.status).cls}`}>{jobStatusMeta(w.status).label}</span></span>
-                  <span>{w.started_at}{w.stopped_at ? ` → ${w.stopped_at}` : ''}</span>
-                  <span className="muted">{w.last_error || '—'}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-head">
-              <h2>Прослушивания</h2>
-            </div>
-            <div className="actions">
-              <button
-                className="ghost"
-                disabled={adminMatchesOffset === 0}
-                onClick={() => setAdminMatchesOffset(prev => Math.max(0, prev - adminMatchesLimit))}
-              >
-                Назад
-              </button>
-              <button
-                className="ghost"
-                onClick={() => setAdminMatchesOffset(prev => prev + adminMatchesLimit)}
-              >
-                Дальше
-              </button>
-              <div className="pill">Сдвиг: {adminMatchesOffset}</div>
-              <div className="pill">Лимит: {adminMatchesLimit}</div>
-            </div>
-            <div className="log-list">
-              {adminMatches.map(m => (
-                <div className="log-item" key={`m-${m.id}`}>
-                  <span>{new Date(m.created_at).toLocaleString()}</span>
-                  <div>{m.message_text || '—'}</div>
-                  <div className="muted">Акк: {m.account_id} • Чат: {m.chat_id} • Msg: {m.message_id}</div>
-                </div>
-              ))}
-              {!adminMatches.length && <div className="muted">Пока ничего нет.</div>}
-            </div>
-          </section>
-        </main>
+      {activeTopTab === 'settings' && (
+        <SettingsTab
+          activeSideTab={settingsSideTab}
+          setActiveSideTab={handleSettingsSideTabChange}
+          accountsProps={settingsAccountsProps}
+          listeningProps={settingsListeningProps}
+          autoChatProps={settingsAutoChatProps}
+          themeProps={themeProps}
+        />
       )}
 
-      {uiErr && <div className="toast">{uiErr}</div>}
+      <div className="toast-stack" aria-live="polite" aria-relevant="additions">
+        {(toasts || []).map(t => (
+          <div key={t.id} className={`toast-item ${t.type || 'info'}`}>
+            <div className="toast-title">
+              {t.title || (t.type === 'error' ? 'Ошибка' : 'Готово')}
+            </div>
+            <button className="toast-close" onClick={() => removeToast(t.id)} aria-label="Закрыть">
+              <span className="toast-close-icon">x</span>
+            </button>
+            {t.message ? <div className="toast-msg">{t.message}</div> : null}
+          </div>
+        ))}
+      </div>
 
       {authModalOpen && (
         <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>

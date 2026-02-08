@@ -11,12 +11,14 @@ rem === Backend BATs ===
 set "AUTH_BAT=%BACK_DIR%\run_auth.bat"
 set "WORKER_BAT=%BACK_DIR%\run_worker.bat"
 set "MAIN_BAT=%BACK_DIR%\run_main.bat"
+set "AI_BAT=%BACK_DIR%\run_ai.bat"
 
 rem === Window titles ===
 set "T1=GRID_FRONT_DEV"
 set "T2=GRID_AUTH"
 set "T3=GRID_WORKER"
 set "T4=GRID_MAIN"
+set "T5=GRID_AI"
 
 rem === Monitor index (0 = primary, 1 = second) ===
 set "MONITOR_INDEX=1"
@@ -33,10 +35,13 @@ start "%T3%" cmd /k "title %T3% && cd /d ""%BACK_DIR%"" && call ""%WORKER_BAT%""
 rem 4) Main (bottom-right)
 start "%T4%" cmd /k "title %T4% && cd /d ""%BACK_DIR%"" && call ""%MAIN_BAT%"""
 
+rem 5) AI (extra)
+start "%T5%" cmd /k "title %T5% && cd /d ""%BACK_DIR%"" && call ""%AI_BAT%"""
+
 rem Wait for windows to appear
 timeout /t 2 /nobreak >nul
 
-rem === Arrange 2x2 on target monitor ===
+rem === Arrange 3x2 on target monitor ===
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 $log = "$env:TEMP\\launcher_debug.txt"; ^
 "--- launcher " + (Get-Date) | Out-File -FilePath $log -Encoding utf8; ^
@@ -79,13 +84,14 @@ $idx = [int]('%MONITOR_INDEX%'); ^
 $target = if($monitors.Count -gt $idx){ $monitors[$idx] } else { $monitors[0] }; ^
 $wa = $target.WorkingArea; ^
 $("target=" + $target.DeviceName + " wa=" + $wa) | Out-File -FilePath $log -Append; ^
-$w = [int]($wa.Width / 2); ^
+$w = [int]($wa.Width / 3); ^
 $h = [int]($wa.Height / 2); ^
 $pos = @(
-  @{title='%T1%'; x=$wa.X;       y=$wa.Y       },
-  @{title='%T2%'; x=$wa.X + $w;  y=$wa.Y       },
-  @{title='%T3%'; x=$wa.X;       y=$wa.Y + $h  },
-  @{title='%T4%'; x=$wa.X + $w;  y=$wa.Y + $h  }
+  @{title='%T1%'; x=$wa.X;          y=$wa.Y       },
+  @{title='%T2%'; x=$wa.X + $w;     y=$wa.Y       },
+  @{title='%T4%'; x=$wa.X + $w*2;   y=$wa.Y       },
+  @{title='%T3%'; x=$wa.X;          y=$wa.Y + $h  },
+  @{title='%T5%'; x=$wa.X + $w;     y=$wa.Y + $h  }
 ); ^
 foreach($p in $pos){
   $hwnd = [IntPtr]::Zero;

@@ -1,0 +1,8 @@
+{
+  "delay_enabled": false,
+  "delay_min_ms": 1200,
+  "delay_max_ms": 4800,
+  "typing_enabled": true,
+  "read_enabled": true
+}
+
