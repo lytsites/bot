@@ -12,13 +12,15 @@ export default function SettingsTab({
   listeningProps,
   autoChatProps,
   themeProps,
-}) {
+  canGroupReading = true,
+  canAutoDialogs = true,
+  }) {
   const items = [
     { id: 'main', label: 'Основные' },
     { id: 'accounts', label: 'Аккаунты' },
-    { id: 'listening', label: 'Прослушивание' },
-    { id: 'auto', label: 'Авто. общение' },
   ]
+  if (canGroupReading) items.push({ id: 'listening', label: 'Чтение групп' })
+  if (canAutoDialogs) items.push({ id: 'auto', label: 'Авто. диалоги' })
 
   return (
     <div className="workspace">
@@ -26,8 +28,8 @@ export default function SettingsTab({
       <div className="workspace-main">
         {activeSideTab === 'main' && <SettingsMain {...themeProps} />}
         {activeSideTab === 'accounts' && <SettingsAccounts {...accountsProps} />}
-        {activeSideTab === 'listening' && <SettingsListening {...listeningProps} />}
-        {activeSideTab === 'auto' && <SettingsAutoChat {...autoChatProps} />}
+        {activeSideTab === 'listening' && canGroupReading && <SettingsListening {...listeningProps} />}
+        {activeSideTab === 'auto' && canAutoDialogs && <SettingsAutoChat {...autoChatProps} />}
       </div>
     </div>
   )

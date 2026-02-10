@@ -63,9 +63,12 @@ def health(probe: bool = Query(False)):
         generate_text(prompt="ping", max_tokens=1, temperature=0.0, top_p=1.0, stop=["\n"], timeout_s=6.0)
         _probe_state["ok"] = True
         _probe_state["error"] = ""
-    except Exception as e:
+    except DeepSeekError:
         _probe_state["ok"] = False
-        _probe_state["error"] = f"{type(e).__name__}: {e}"
+        _probe_state["error"] = "AI_PROVIDER_ERROR"
+    except Exception:
+        _probe_state["ok"] = False
+        _probe_state["error"] = "AI_ERROR"
     finally:
         _probe_state["last_at"] = now
 
@@ -83,9 +86,12 @@ def generate(req: GenerateReq):
         )
         return {"ok": True, **result}
     except DeepSeekError as e:
-        raise HTTPException(500, f"DEEPSEEK_ERROR: {e}")
+        # Do not leak provider/internal details to clients.
+        logger.info("deepseek error: %s", e)
+        raise HTTPException(503, "AI_PROVIDER_ERROR")
     except Exception as e:
-        raise HTTPException(500, f"AI_ERROR: {type(e).__name__}: {e}")
+        logger.exception("ai generate failed")
+        raise HTTPException(500, "AI_ERROR")
 
 
 @app.post("/ai/reload")

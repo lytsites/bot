@@ -1,6 +1,20 @@
-const isProd = typeof window !== 'undefined' && window.location.hostname.endsWith('e-qoldau.asia')
-const AUTH_API = isProd ? 'https://api.e-qoldau.asia' : 'http://127.0.0.1:8001'
-const MAIN_API = isProd ? 'https://api.e-qoldau.asia' : 'http://127.0.0.1:8000'
+function baseDomainFromHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase()
+  if (!host || host === 'localhost' || host === '127.0.0.1') return ''
+  // Works for most domains we use here (e.g. prok.services, e-qoldau.asia).
+  const parts = host.split('.').filter(Boolean)
+  if (parts.length < 2) return ''
+  return parts.slice(-2).join('.')
+}
+
+const isBrowser = typeof window !== 'undefined' && typeof window.location !== 'undefined'
+const host = isBrowser ? window.location.hostname : ''
+const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local')
+const baseDomain = baseDomainFromHost(host)
+
+// Dev: local services. Prod: use per-domain subdomains behind Cloudflare tunnel.
+const AUTH_API = isLocalHost || !baseDomain ? 'http://127.0.0.1:8001' : `https://auth.${baseDomain}`
+const MAIN_API = isLocalHost || !baseDomain ? 'http://127.0.0.1:8000' : `https://api.${baseDomain}`
 
 const TOKEN_KEY = 'local_auth_token'
 
@@ -18,23 +32,42 @@ export function setAuthToken(token) {
 
 async function request(base, path, options = {}, withAuth = true) {
   const headers = { ...(options.headers || {}) }
+  const token = withAuth ? getAuthToken() : ''
   if (withAuth) {
-    const token = getAuthToken()
     if (token) headers['X-Auth-Token'] = token
   }
   const res = await fetch(base + path, { ...options, headers })
   const text = await res.text()
   if (!res.ok) {
-    if (res.status === 401) {
+    let detail = ''
+    if (text) {
+      try {
+        const parsed = JSON.parse(text)
+        detail = String(parsed?.detail || parsed?.message || parsed?.error || '')
+      } catch {
+        detail = String(text)
+      }
+    }
+    const code = (detail.split(':')[0] || '').trim() || detail.trim()
+
+    // Only treat as "auth expired" when we actually sent a token and server says UNAUTHORIZED.
+    if (res.status === 401 && withAuth && token && (code === 'UNAUTHORIZED' || !code)) {
       setAuthToken('')
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('auth:expired'))
       }
       throw new Error('UNAUTHORIZED')
     }
-    throw new Error(text || res.statusText)
+
+    // Preserve the backend error code if provided.
+    throw new Error(code || res.statusText || 'ERROR')
   }
-  return text ? JSON.parse(text) : {}
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { ok: true, text }
+  }
 }
 
 export async function authPost(path, payload) {

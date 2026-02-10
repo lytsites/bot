@@ -21,6 +21,7 @@ from common.config import (
 from common.crypto import decrypt_text, encrypt_text
 from common.db import db
 from common.logging_setup import get_logger
+from common.phone import normalize_phone_digits, phone_variants
 import qrcode
 
 
@@ -141,6 +142,28 @@ def _active_flow_exists(con, phone: str) -> bool:
     return row is not None
 
 
+def _active_qr_flow_exists(con, local_user_id: int) -> bool:
+    row = con.execute(
+        """
+        SELECT 1
+        FROM auth_flows
+        WHERE local_user_id=?
+          AND method=?
+          AND status IN (?, ?, ?)
+          AND expires_at > ?
+        """,
+        (
+            local_user_id,
+            METHOD_QR,
+            STATUS_QR_READY,
+            STATUS_QR_WAIT_CONFIRM,
+            STATUS_WAIT_PASSWORD,
+            now_iso(),
+        ),
+    ).fetchone()
+    return row is not None
+
+
 def _set_error(auth_id: str, message: str) -> None:
     def _run(con):
         con.execute(
@@ -185,19 +208,27 @@ def start_auth(phone: str | None, local_user_id: int) -> dict:
     if not TG_API_ID or not TG_API_HASH:
         raise RuntimeError("TG_API_ID/TG_API_HASH not set")
 
-    phone = (phone or "").strip()
-    if not phone:
-        raise ValueError("PHONE_REQUIRED")
+    # Normalize to digits-only to match existing DB conventions and avoid Telethon TypeErrors.
+    digits = normalize_phone_digits(phone)
+    variants = phone_variants(digits)
 
     auth_id = str(uuid.uuid4())
     enc_empty = encrypt_text("")
 
     async def _run():
         with db() as con:
-            if _active_flow_exists(con, phone):
+            # Avoid parallel flows for the same phone, including legacy '+'-prefixed storage.
+            if _active_flow_exists(con, variants[0]) or _active_flow_exists(con, variants[1]):
                 raise ValueError("AUTH_IN_PROGRESS")
 
-            account_row = _account_by_phone(con, phone)
+            # If account already exists under a legacy representation, keep using that representation
+            # to prevent inserting a duplicate row with a different phone string.
+            db_phone = variants[0]
+            account_row = _account_by_phone(con, variants[0])
+            if not account_row:
+                account_row = _account_by_phone(con, variants[1])
+                if account_row:
+                    db_phone = variants[1]
             if account_row:
                 account_id = account_row["id"]
                 if _has_active_session(con, account_id):
@@ -210,13 +241,14 @@ def start_auth(phone: str | None, local_user_id: int) -> dict:
                 INSERT INTO auth_flows(auth_id, phone, status, temp_session, phone_code_hash, expires_at, method, error_message, local_user_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (auth_id, phone, STATUS_NEW, enc_empty, None, expires_at_iso(), METHOD_CODE, None, local_user_id),
+                (auth_id, db_phone, STATUS_NEW, enc_empty, None, expires_at_iso(), METHOD_CODE, None, local_user_id),
             )
 
         client = TelegramClient(StringSession(""), TG_API_ID, TG_API_HASH)
         await client.connect()
         try:
-            sent = await client.send_code_request(phone)
+            # Telethon accepts digits-only phone numbers; keep consistent with db_phone above.
+            sent = await client.send_code_request(db_phone)
             session_string = client.session.save()
             enc_session = encrypt_text(session_string)
 
@@ -238,7 +270,7 @@ def start_auth(phone: str | None, local_user_id: int) -> dict:
 
     import asyncio
 
-    logger.info("auth.start phone=%s", phone)
+    logger.info("auth.start phone=%s", variants[0])
     return asyncio.run(_run())
 
 
@@ -837,6 +869,10 @@ async def _qr_refresh_flow(auth_id: str) -> dict:
 def start_qr_auth(local_user_id: int) -> dict:
     if not TG_API_ID or not TG_API_HASH:
         raise RuntimeError("TG_API_ID/TG_API_HASH not set")
+    with db() as con:
+        # Prevent resource exhaustion: allow only one active QR auth flow per local user at a time.
+        if _active_qr_flow_exists(con, local_user_id):
+            raise ValueError("AUTH_IN_PROGRESS")
     auth_id = str(uuid.uuid4())
     return _run_qr(_qr_create_flow(auth_id, local_user_id))
 

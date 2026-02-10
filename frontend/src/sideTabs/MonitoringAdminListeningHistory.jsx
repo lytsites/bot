@@ -9,7 +9,7 @@ export default function MonitoringAdminListeningHistory({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>История прослушивания</h2>
+        <h2>История чтения групп</h2>
       </div>
       <div className="actions">
         <button
@@ -28,7 +28,7 @@ export default function MonitoringAdminListeningHistory({
         <div className="pill">Сдвиг: {adminMatchesOffset}</div>
         <div className="pill">Лимит: {adminMatchesLimit}</div>
       </div>
-      <div className="log-list">
+      <div className="log-list lg">
         {adminMatches.map(m => (
           <div className="log-item" key={`m-${m.id}`}>
             <span>{new Date(m.created_at).toLocaleString()}</span>

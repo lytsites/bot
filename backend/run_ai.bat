@@ -1,6 +1,8 @@
 @echo off
-cd /d %~dp0
-set FRONTEND_ORIGINS=https://node.e-qoldau.asia,http://localhost:5173
+cd /d "%~dp0"
+rem Frontend origins allowed for CORS (comma-separated).
+rem Add both http/https because Cloudflare tunnel may serve either depending on your settings.
+set "FRONTEND_ORIGINS=https://prok.services,http://prok.services,https://node.e-qoldau.asia,http://localhost:5173"
 
 rem Optional overrides:
 rem set DEEPSEEK_API_KEY=

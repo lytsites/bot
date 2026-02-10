@@ -10,14 +10,20 @@ export default function HomeListening({
   groupMatchCounts,
   setGroupListening,
   openMatchesModal,
+  reloadGroups,
 }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Прослушивание</h2>
-        <span className="muted">
-          {activeAccountId ? `Аккаунт #${activeAccountId}` : 'Нет активного аккаунта'}
-        </span>
+        <h2>Чтение групп</h2>
+        <div className="row-actions">
+          <span className="muted">
+            {activeAccountId ? `Аккаунт #${activeAccountId}` : 'Нет активного аккаунта'}
+          </span>
+          <button className="ghost" onClick={() => reloadGroups?.()} type="button">
+            Обновить
+          </button>
+        </div>
       </div>
 
       {groupsLoading && <p className="muted">Загрузка...</p>}

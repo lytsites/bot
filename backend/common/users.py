@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Optional
 
@@ -17,7 +17,7 @@ def role_from_str(v: str | None) -> int:
         return ROLE_USER
     if v in ("admin", "админ"):
         return ROLE_ADMIN
-    if v in ("superadmin", "super_admin", "super-admin", "суперадмин", "супер-админ"):
+    if v in ("superadmin", "super_admin", "super-admin", "суперадмин", "супер-админ", "супер админ"):
         return ROLE_SUPER_ADMIN
     raise ValueError("INVALID_ROLE")
 
@@ -51,6 +51,10 @@ def create_local_user(
     password_hash: str,
     role: int,
     is_active: bool = True,
+    service_enabled: bool = True,
+    feature_group_reading_enabled: bool = True,
+    feature_auto_dialogs_enabled: bool = True,
+    disabled_comment: Optional[str] = None,
 ) -> int:
     now = now_iso()
     defaults = load_new_local_user_defaults()
@@ -62,21 +66,46 @@ def create_local_user(
     try:
         con.execute(
             """
-            INSERT INTO local_users(login, password_hash, is_active, is_admin, role, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO local_users(
+              login, password_hash, is_active, is_admin, role,
+              service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment,
+              created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (login, password_hash, 1 if is_active else 0, is_admin, int(role), now, now),
+            (
+                login,
+                password_hash,
+                1 if is_active else 0,
+                is_admin,
+                int(role),
+                1 if service_enabled else 0,
+                1 if feature_group_reading_enabled else 0,
+                1 if feature_auto_dialogs_enabled else 0,
+                (disabled_comment or "").strip() or None,
+                now,
+                now,
+            ),
         )
     except Exception:
-        # If DB doesn't have role column yet (shouldn't happen if migrations applied),
-        # fall back to legacy schema so CLI doesn't hard-crash.
-        con.execute(
-            """
-            INSERT INTO local_users(login, password_hash, is_active, is_admin, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (login, password_hash, 1 if is_active else 0, is_admin, now, now),
-        )
+        # If DB doesn't have the new columns yet (or even role column), fall back.
+        # This keeps CLI/scripts from hard-crashing on older DBs.
+        try:
+            con.execute(
+                """
+                INSERT INTO local_users(login, password_hash, is_active, is_admin, role, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (login, password_hash, 1 if is_active else 0, is_admin, int(role), now, now),
+            )
+        except Exception:
+            con.execute(
+                """
+                INSERT INTO local_users(login, password_hash, is_active, is_admin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (login, password_hash, 1 if is_active else 0, is_admin, now, now),
+            )
 
     user_row = con.execute("SELECT last_insert_rowid() AS id").fetchone()
     user_id = int(user_row["id"])
@@ -141,4 +170,3 @@ def can_delete_target(actor_role: int, target_role: int) -> bool:
         return target_role == ROLE_USER
     # super-admin
     return target_role in (ROLE_USER, ROLE_ADMIN)
-

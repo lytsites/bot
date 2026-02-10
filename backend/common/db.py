@@ -9,8 +9,22 @@ from common.config import DB_PATH
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
+def _ensure_db_dir() -> None:
+    try:
+        raw = str(DB_PATH or "").strip()
+        if not raw or raw == ":memory:":
+            return
+        p = Path(raw)
+        parent = p.parent
+        if parent and str(parent) not in (".", ""):
+            parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Never block the app from starting because of a best-effort dir creation.
+        pass
+
 
 def init_db() -> None:
+    _ensure_db_dir()
     with sqlite3.connect(DB_PATH, timeout=10) as con:
         _configure_con(con)
         apply_migrations(con)
@@ -83,6 +97,7 @@ def apply_migrations(con: sqlite3.Connection) -> None:
 
 @contextmanager
 def db():
+    _ensure_db_dir()
     con = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     _configure_con(con)
     con.row_factory = sqlite3.Row

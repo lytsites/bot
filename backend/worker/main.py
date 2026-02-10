@@ -28,6 +28,7 @@ setup_logging()
 logger = get_logger("worker")
 
 POLL_INTERVAL_SEC = 1.5
+GROUP_LISTENER_INITIAL_SCAN_LIMIT = int(os.getenv("GROUP_LISTENER_INITIAL_SCAN_LIMIT", "200"))
 
 STATUS_PENDING = "PENDING"
 STATUS_RUNNING = "RUNNING"
@@ -176,10 +177,14 @@ class Worker:
         with db() as con:
             row = con.execute(
                 """
-                SELECT id, account_id, type, status, progress
-                FROM jobs
-                WHERE status=?
-                ORDER BY id ASC
+                SELECT j.id, j.account_id, j.type, j.status, j.progress
+                FROM jobs j
+                JOIN accounts a ON a.id = j.account_id
+                JOIN local_users u ON u.id = a.local_user_id
+                WHERE j.status=?
+                  AND u.is_active=1
+                  AND COALESCE(u.service_enabled, 1)=1
+                ORDER BY j.id ASC
                 LIMIT 1
                 """,
                 (STATUS_PENDING,),
@@ -280,21 +285,37 @@ class Worker:
                     self._ensure_group_worker_run(account_id)
                 self._stop_inactive_group_runs(active_ids)
                 for account_id, group_rows in groups_by_account.items():
-                    keywords = self._load_keywords_for_account(account_id)
-                    if not keywords:
-                        continue
                     try:
-                        client = await self.client_manager.get_client(account_id)
-                    except Exception:
-                        continue
-
-                    dialog_map = await self._get_dialog_map(account_id, client, {r["chat_id"] for r in group_rows})
-                    for row in group_rows:
-                        chat_id = row["chat_id"]
-                        entity = dialog_map.get(chat_id)
-                        if not entity:
+                        keywords = self._load_keywords_for_account(account_id)
+                        keywords = [(k or "").strip().lower() for k in (keywords or []) if (k or "").strip()]
+                        keyword_patterns = self._compile_keyword_patterns(keywords)
+                        if not keyword_patterns:
                             continue
-                        await self._scan_group_messages(client, account_id, chat_id, entity, row["last_message_id"], keywords)
+                        try:
+                            client = await self.client_manager.get_client(account_id)
+                        except Exception:
+                            continue
+
+                        dialog_map = await self._get_dialog_map(account_id, client, {r["chat_id"] for r in group_rows})
+                        for row in group_rows:
+                            chat_id = row["chat_id"]
+                            entity = dialog_map.get(chat_id)
+                            if not entity:
+                                continue
+                            try:
+                                await self._scan_group_messages(
+                                    client, account_id, chat_id, entity, row["last_message_id"], keywords, keyword_patterns
+                                )
+                            except AuthKeyUnregisteredError:
+                                await self.client_manager.invalidate_session(account_id)
+                                break
+                            except Exception:
+                                logger.exception("group scan failed account_id=%s chat_id=%s", account_id, chat_id)
+                    except AuthKeyUnregisteredError:
+                        await self.client_manager.invalidate_session(account_id)
+                        continue
+                    except Exception:
+                        logger.exception("listener account failed account_id=%s", account_id)
                 await asyncio.sleep(5.0)
             except asyncio.CancelledError:
                 break
@@ -310,7 +331,12 @@ class Worker:
                 FROM group_listeners gl
                 JOIN accounts a ON a.id = gl.account_id
                 JOIN local_user_settings s ON s.user_id = a.local_user_id
-                WHERE gl.is_listening=1 AND s.is_active=1
+                JOIN local_users u ON u.id = a.local_user_id
+                WHERE gl.is_listening=1
+                  AND s.is_active=1
+                  AND u.is_active=1
+                  AND COALESCE(u.service_enabled, 1)=1
+                  AND COALESCE(u.feature_group_reading_enabled, 1)=1
                 """
             ).fetchall()
         grouped: Dict[int, List[dict]] = {}
@@ -374,6 +400,14 @@ class Worker:
                 SELECT id, account_id, peer_tg_user_id, peer_username, peer_display_name
                 FROM auto_chat_dialogs
                 WHERE status=?
+                  AND account_id IN (
+                    SELECT a.id
+                    FROM accounts a
+                    JOIN local_users u ON u.id = a.local_user_id
+                    WHERE u.is_active=1
+                      AND COALESCE(u.service_enabled, 1)=1
+                      AND COALESCE(u.feature_auto_dialogs_enabled, 1)=1
+                  )
                 ORDER BY updated_at ASC, id ASC
                 LIMIT ?
                 """,
@@ -388,8 +422,10 @@ class Worker:
                 SELECT DISTINCT d.account_id AS account_id
                 FROM auto_chat_dialogs d
                 JOIN accounts a ON a.id = d.account_id
-                JOIN local_user_settings s ON s.user_id = a.local_user_id
-                WHERE s.is_active=1
+                JOIN local_users u ON u.id = a.local_user_id
+                WHERE u.is_active=1
+                  AND COALESCE(u.service_enabled, 1)=1
+                  AND COALESCE(u.feature_auto_dialogs_enabled, 1)=1
                   AND d.status IN (?, ?, ?)
                 """,
                 (AUTO_CHAT_STATUS_STARTING, AUTO_CHAT_STATUS_WAIT_REPLY, AUTO_CHAT_STATUS_ACTIVE),
@@ -404,6 +440,14 @@ class Worker:
                 FROM auto_chat_dialogs
                 WHERE pending_incoming=1
                   AND status IN (?, ?)
+                  AND account_id IN (
+                    SELECT a.id
+                    FROM accounts a
+                    JOIN local_users u ON u.id = a.local_user_id
+                    WHERE u.is_active=1
+                      AND COALESCE(u.service_enabled, 1)=1
+                      AND COALESCE(u.feature_auto_dialogs_enabled, 1)=1
+                  )
                 ORDER BY updated_at ASC, id ASC
                 LIMIT ?
                 """,
@@ -866,6 +910,42 @@ class Worker:
                 (RUN_STATUS_STOPPED, now_iso(), RUN_STATUS_RUNNING),
             )
 
+    @staticmethod
+    def _compile_keyword_patterns(keywords: List[str]) -> List[re.Pattern]:
+        """
+        Match whole words/phrases only (case-insensitive).
+        Example: keyword 'сон' matches 'сон.' but NOT 'персонаж'.
+        """
+        out: List[re.Pattern] = []
+        for k in keywords or []:
+            k = (k or "").strip()
+            if not k:
+                continue
+            # \w in Python is Unicode-aware (Cyrillic included).
+            pat = re.compile(rf"(?<!\w){re.escape(k)}(?!\w)", re.IGNORECASE)
+            out.append(pat)
+        return out
+
+    @staticmethod
+    def _text_matches_keywords(text: str, patterns: List[re.Pattern]) -> bool:
+        if not text or not patterns:
+            return False
+        for p in patterns:
+            if p.search(text):
+                return True
+        return False
+
+    @staticmethod
+    def _matched_keywords(text: str, keywords: List[str], patterns: List[re.Pattern]) -> List[str]:
+        """Return the keywords that matched (whole word/phrase, case-insensitive)."""
+        if not text or not keywords or not patterns:
+            return []
+        out: List[str] = []
+        for k, p in zip(keywords, patterns):
+            if p.search(text):
+                out.append(k)
+        return out
+
     def _load_keywords_for_account(self, account_id: int) -> List[str]:
         with db() as con:
             row = con.execute(
@@ -909,6 +989,10 @@ class Worker:
             logger.info("Flood wait on get_dialogs: %ss", e.seconds)
             await asyncio.sleep(min(e.seconds, 30))
             return {}
+        except Exception as e:
+            # Network hiccups, timeouts, etc. Should not kill the whole listener loop.
+            logger.info("get_dialogs failed: %s: %s", type(e).__name__, e)
+            return {}
         return {d.id: d.entity for d in dialogs if d.id in ids}
 
     async def _scan_group_messages(
@@ -919,22 +1003,28 @@ class Worker:
         entity: object,
         last_message_id: Optional[int],
         keywords: List[str],
+        keyword_patterns: List[re.Pattern],
     ) -> None:
         last_id = last_message_id or 0
         if last_id == 0:
-            msgs = await client.get_messages(entity, limit=20)
+            limit = GROUP_LISTENER_INITIAL_SCAN_LIMIT
+            if limit < 20:
+                limit = 20
+            if limit > 2000:
+                limit = 2000
+            msgs = await client.get_messages(entity, limit=limit)
             max_id = last_id
             for msg in reversed(msgs):
                 if not msg or not msg.id:
                     continue
                 max_id = max(max_id, msg.id)
-                text = getattr(msg, "message", None)
+                text = getattr(msg, "raw_text", None) or getattr(msg, "message", None)
                 if not text:
                     continue
-                low = text.lower()
-                if any(k in low for k in keywords):
+                if self._text_matches_keywords(text, keyword_patterns):
                     phone = await self._try_get_sender_phone(client, msg)
-                    self._insert_match(account_id, chat_id, msg.id, text, msg.date, phone)
+                    mk = self._matched_keywords(text, keywords, keyword_patterns)
+                    self._insert_match(account_id, chat_id, msg.id, text, msg.date, phone, mk)
             if max_id:
                 self._update_last_message_id(account_id, chat_id, max_id)
             return
@@ -944,13 +1034,13 @@ class Worker:
             if not msg or not msg.id:
                 continue
             max_id = max(max_id, msg.id)
-            text = getattr(msg, "message", None)
+            text = getattr(msg, "raw_text", None) or getattr(msg, "message", None)
             if not text:
                 continue
-            low = text.lower()
-            if any(k in low for k in keywords):
+            if self._text_matches_keywords(text, keyword_patterns):
                 phone = await self._try_get_sender_phone(client, msg)
-                self._insert_match(account_id, chat_id, msg.id, text, msg.date, phone)
+                mk = self._matched_keywords(text, keywords, keyword_patterns)
+                self._insert_match(account_id, chat_id, msg.id, text, msg.date, phone, mk)
         if max_id != last_id:
             self._update_last_message_id(account_id, chat_id, max_id)
 
@@ -965,16 +1055,35 @@ class Worker:
                 (last_id, now_iso(), account_id, chat_id),
             )
 
-    def _insert_match(self, account_id: int, chat_id: int, message_id: int, text: str, dt: datetime, sender_phone: Optional[str]) -> None:
+    def _insert_match(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        dt: datetime,
+        sender_phone: Optional[str],
+        matched_keywords: Optional[List[str]] = None,
+    ) -> None:
         if not message_id:
             return
+        mk = ""
+        if matched_keywords:
+            mk = ", ".join([k.strip().lower() for k in matched_keywords if (k or "").strip()])
         with db() as con:
             con.execute(
                 """
-                INSERT OR IGNORE INTO group_matches(account_id, chat_id, message_id, message_text, sender_phone, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO group_matches(
+                    account_id, chat_id, message_id, message_text, sender_phone, matched_keywords, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
+                    matched_keywords=CASE
+                        WHEN COALESCE(group_matches.matched_keywords, '')='' THEN excluded.matched_keywords
+                        ELSE group_matches.matched_keywords
+                    END
                 """,
-                (account_id, chat_id, message_id, text, sender_phone, dt.isoformat() if dt else now_iso()),
+                (account_id, chat_id, message_id, text, sender_phone, mk, dt.isoformat() if dt else now_iso()),
             )
             # Сохраняем реквизиты из сообщения
             self._insert_requisites(

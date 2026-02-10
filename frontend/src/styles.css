@@ -344,6 +344,14 @@ input {
   color: var(--ink);
 }
 
+select {
+  width: 100%;
+  padding: 12px 14px;
+  margin-top: 6px;
+  font-size: 14px;
+  outline: none;
+}
+
 textarea {
   width: 100%;
   padding: 12px 14px;
@@ -445,6 +453,18 @@ button:disabled {
   color: var(--ink);
 }
 
+/* Make key/value blocks and fields in modals less "stuck together". */
+.modal .kv span {
+  display: block;
+}
+.modal .kv strong {
+  display: block;
+  margin-top: 2px;
+}
+.modal .field label:not(.toggle) {
+  display: block;
+}
+
 .subcard {
   margin-top: 14px;
   padding: 14px;
@@ -497,6 +517,12 @@ button:disabled {
 }
 .status.success { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
 .status.error { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.status.warn { background: color-mix(in srgb, var(--brand) 14%, transparent); color: var(--ink); }
+.status.warn .actions { margin-top: 10px; }
+
+.subcard .actions {
+  margin-top: 12px;
+}
 
 .split {
   display: grid;
@@ -509,8 +535,8 @@ button:disabled {
   gap: 10px;
 }
 
-.table-head span,
-.table-row span {
+.table-head > span,
+.table-row > span {
   padding: 2px 0;
 }
 
@@ -640,6 +666,7 @@ button:disabled {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 700;
+  line-height: 1.35;
   letter-spacing: 0.02em;
   background: var(--surface-2);
   color: var(--muted);
@@ -670,6 +697,14 @@ button:disabled {
   color: var(--muted);
 }
 
+/* Two (or more) tags in a tight table cell: wrap nicely with spacing. */
+.tag-stack {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px 8px; /* row/col gaps when wrapping */
+  align-items: center;
+}
+
 .progress {
   height: 8px;
   background: var(--surface-2);
@@ -695,6 +730,14 @@ button:disabled {
   font-size: 12px;
 }
 
+.log-list.lg .log-item {
+  font-size: 14px;
+}
+
+.log-list.lg .muted {
+  font-size: 13px;
+}
+
 .log-item strong {
   font-size: 12px;
   letter-spacing: 0.06em;
@@ -706,6 +749,24 @@ body.theme-dark .log-item.error { background: color-mix(in srgb, var(--danger) 1
 .muted {
   color: var(--muted);
   font-size: 12px;
+}
+
+.msg-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.kw-hit {
+  background: rgba(46, 204, 113, 0.92);
+  color: #fff;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+body.theme-dark .kw-hit {
+  background: rgba(46, 204, 113, 0.78);
 }
 
 /* Messenger-like chat thread (Home -> Auto. общение) */
@@ -1120,6 +1181,8 @@ body.theme-dark .chat-bubble {
   position: relative;
   outline: none;
   cursor: pointer;
+  margin-top: 0;
+  padding: 0;
 }
 
 .toggle input::after {
@@ -1200,11 +1263,92 @@ body.theme-dark .chat-bubble {
   overflow: auto;
 }
 
+/* Forced modal (offline / AI down) */
+.sys-block-backdrop {
+  z-index: 2200; /* above any other modal/toast */
+}
+
+.sys-block-modal {
+  width: min(520px, 100%);
+  text-align: center;
+}
+
+.sys-block-icon {
+  display: grid;
+  place-items: center;
+  margin: 4px 0 10px;
+  opacity: 0.92;
+}
+
+.sys-block-title {
+  margin: 0 0 8px;
+  font-size: 22px;
+  line-height: 1.15;
+}
+
+.sys-block-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
 .modal-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+}
+
+/* Service disabled screen */
+.service-disabled {
+  width: 100%;
+  max-width: none;
+  text-align: center;
+}
+.service-disabled-icon {
+  font-size: 64px;
+  line-height: 1;
+  margin: 6px 0 14px;
+  color: color-mix(in srgb, var(--ink) 70%, var(--muted));
+  filter: drop-shadow(0 10px 18px rgba(31, 36, 48, 0.18));
+  position: relative;
+}
+.service-disabled-icon svg {
+  display: block;
+  margin: 0 auto;
+}
+.service-disabled-icon::before {
+  content: '';
+  position: absolute;
+  inset: -14px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 50% 40%, currentColor, transparent 60%);
+  opacity: 0.14;
+  filter: blur(2px);
+  pointer-events: none;
+}
+
+.service-disabled-title {
+  font-size: 30px;
+  margin-top: 6px;
+}
+
+.service-disabled-subtitle {
+  font-size: 18px;
+  margin-top: 8px;
+}
+
+.service-disabled-reason {
+  display: inline-block;
+  width: fit-content;
+  max-width: min(640px, 100%);
+  margin-left: auto;
+  margin-right: auto;
+  text-align: left;
+}
+
+.service-disabled-reason strong {
+  font-weight: 800;
 }
 
 @media (max-width: 900px) {

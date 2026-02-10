@@ -5,11 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from common.logging_setup import get_logger
+
 
 _DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
 _DEFAULTS_JSON = _DEFAULTS_DIR / "new_local_user.json"
 _DEFAULTS_INSTRUCTION = _DEFAULTS_DIR / "new_local_user_instruction.txt"
 _DEFAULTS_GREETINGS = _DEFAULTS_DIR / "new_local_user_greeting_examples.txt"
+
+logger = get_logger("ai.defaults")
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,8 @@ class NewLocalUserDefaults:
 def _read_text(p: Path) -> str:
     try:
         return p.read_text(encoding="utf-8")
-    except Exception:
+    except Exception as e:
+        logger.info("defaults read failed path=%s err=%s: %s", str(p), type(e).__name__, e)
         return ""
 
 
@@ -44,7 +49,8 @@ def load_new_local_user_defaults() -> NewLocalUserDefaults:
     try:
         if _DEFAULTS_JSON.exists():
             data = json.loads(_DEFAULTS_JSON.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        logger.info("defaults json parse failed path=%s err=%s: %s", str(_DEFAULTS_JSON), type(e).__name__, e)
         data = {}
 
     delay_enabled = 1 if bool(data.get("delay_enabled", False)) else 0
@@ -67,4 +73,3 @@ def load_new_local_user_defaults() -> NewLocalUserDefaults:
         typing_enabled=typing_enabled,
         read_enabled=read_enabled,
     )
-

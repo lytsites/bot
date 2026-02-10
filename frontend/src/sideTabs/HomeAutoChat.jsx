@@ -200,7 +200,7 @@ export default function HomeAutoChat({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Авто. общение</h2>
+        <h2>Авто. диалоги</h2>
         <div className="row-actions">
           <div className="pill">Активно: {activeCount}/{limit}</div>
           <button
@@ -210,9 +210,6 @@ export default function HomeAutoChat({
             type="button"
           >
             Запустить ({selectedToStart.length})
-          </button>
-          <button className="ghost" onClick={() => reload().catch(() => {})} type="button">
-            Обновить
           </button>
         </div>
       </div>

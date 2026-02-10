@@ -1,6 +1,9 @@
 import React, { useMemo } from 'react'
 
 export default function HomeRequisitesHistory({
+  showScopeToggle,
+  scope,
+  setScope,
   homeRequisites,
   homeRequisitesErr,
   homeRequisitesLoading,
@@ -57,6 +60,24 @@ export default function HomeRequisitesHistory({
       <div className="panel-head">
         <h2>История реквизитов</h2>
         <div className="row-actions">
+          {showScopeToggle && (
+            <div className="seg" role="tablist" aria-label="Режим истории">
+              <button
+                type="button"
+                className={`seg-btn ${scope === 'personal' ? 'active' : ''}`}
+                onClick={() => setScope('personal')}
+              >
+                Личные
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${scope === 'common' ? 'active' : ''}`}
+                onClick={() => setScope('common')}
+              >
+                Общие
+              </button>
+            </div>
+          )}
           <button className="ghost" onClick={() => reload().catch(() => {})} type="button">
             Обновить
           </button>

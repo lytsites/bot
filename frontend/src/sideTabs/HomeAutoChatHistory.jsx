@@ -2,6 +2,9 @@ import React, { useMemo } from 'react'
 import ChatThread from '../components/ChatThread'
 
 export default function HomeAutoChatHistory({
+  showScopeToggle,
+  scope,
+  setScope,
   homeAutoChatDialogs,
   homeAutoChatDialogsMeta,
   homeAutoChatDialogsErr,
@@ -54,6 +57,24 @@ export default function HomeAutoChatHistory({
           </button>
           <h2>{title}</h2>
           <div className="row-actions">
+            {showScopeToggle && (
+              <div className="seg" role="tablist" aria-label="Режим истории">
+                <button
+                  type="button"
+                  className={`seg-btn ${scope === 'personal' ? 'active' : ''}`}
+                  onClick={() => setScope('personal')}
+                >
+                  Личные
+                </button>
+                <button
+                  type="button"
+                  className={`seg-btn ${scope === 'common' ? 'active' : ''}`}
+                  onClick={() => setScope('common')}
+                >
+                  Общие
+                </button>
+              </div>
+            )}
             <span className={`badge ${statusBadgeClass(homeAutoChatHistoryActive.status)}`}>
               {statusLabel(homeAutoChatHistoryActive.status)}
             </span>
@@ -85,15 +106,29 @@ export default function HomeAutoChatHistory({
     )
   }
 
-  const limit = homeAutoChatDialogsMeta?.limit ?? 10
-  const activeCount = homeAutoChatDialogsMeta?.active_count ?? 0
-
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>История диалогов</h2>
+        <h2>История авто. диалогов</h2>
         <div className="row-actions">
-          <div className="pill">Активно: {activeCount}/{limit}</div>
+          {showScopeToggle && (
+            <div className="seg" role="tablist" aria-label="Режим истории">
+              <button
+                type="button"
+                className={`seg-btn ${scope === 'personal' ? 'active' : ''}`}
+                onClick={() => setScope('personal')}
+              >
+                Личные
+              </button>
+              <button
+                type="button"
+                className={`seg-btn ${scope === 'common' ? 'active' : ''}`}
+                onClick={() => setScope('common')}
+              >
+                Общие
+              </button>
+            </div>
+          )}
           <button className="ghost" onClick={() => reload().catch(() => {})} type="button">
             Обновить
           </button>
@@ -138,4 +173,3 @@ export default function HomeAutoChatHistory({
     </section>
   )
 }
-

@@ -1,8 +1,6 @@
 *.pyc
 __pycache__/
 .venv/
-.env
-*.env
 data.sqlite3
 **/data.sqlite3
 logs/

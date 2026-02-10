@@ -61,7 +61,7 @@ export default function SettingsAutoChat({
   return (
     <section className="panel empty-state">
       <div className="panel-head">
-        <h2>Авто. общение</h2>
+        <h2>Авто. диалоги</h2>
       </div>
       <div className="field">
         <label>Юзернеймы Telegram (по одному на строку, без @)</label>

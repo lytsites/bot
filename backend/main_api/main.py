@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 import os
 import asyncio
+import sqlite3
+import re
 from typing import Optional
 
 import httpx
@@ -50,6 +52,41 @@ init_db()
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
+def _compile_keywords_patterns_csv(raw: str) -> list[re.Pattern]:
+    parts = [p.strip() for p in str(raw or "").split(",")]
+    parts = [p for p in parts if p]
+    seen = set()
+    out = []
+    for p in parts:
+        k = p.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    # Whole word/phrase match (case-insensitive), Unicode-aware.
+    return [re.compile(rf"(?<!\w){re.escape(p)}(?!\w)", re.IGNORECASE) for p in out if p]
+
+
+def _sync_group_matches_home_hidden(con: sqlite3.Connection, account_id: int, patterns: list[re.Pattern]) -> None:
+    """
+    Ensure Home -> "Чтение групп" can hide stale matches that no longer match keywords,
+    while Monitoring history keeps full data.
+    """
+    if not patterns:
+        con.execute("UPDATE group_matches SET home_hidden=1 WHERE account_id=?", (account_id,))
+        return
+    rows = con.execute(
+        "SELECT id, message_text FROM group_matches WHERE account_id=?",
+        (account_id,),
+    ).fetchall()
+    for r in rows:
+        text = r["message_text"] or ""
+        ok = any(p.search(text) for p in patterns)
+        con.execute(
+            "UPDATE group_matches SET home_hidden=? WHERE id=?",
+            (0 if ok else 1, r["id"]),
+        )
+
 
 AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002").rstrip("/")
 
@@ -71,11 +108,18 @@ def ai_status(request: Request, probe: bool = Query(False)):
             timeout=4.0,
         )
         if r.status_code >= 400:
-            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:500]}"}
+            code = ""
+            try:
+                data = r.json()
+                code = str(data.get("detail") or data.get("error") or "").strip()
+            except Exception:
+                code = ""
+            return {"ok": False, "error": code or "AI_UNAVAILABLE"}
         data = r.json()
         return {"ok": True, **data}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        logger.info("ai status failed: %s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "AI_UNAVAILABLE"}
 
 
 class LoginReq(BaseModel):
@@ -85,7 +129,11 @@ class LoginReq(BaseModel):
 
 @app.post("/local/login")
 def local_login(req: LoginReq):
-    password_hash = hash_password(req.password)
+    login = (req.login or "").strip()
+    password = req.password or ""
+    if not login or not str(password).strip():
+        raise HTTPException(400, "MISSING_FIELDS")
+    password_hash = hash_password(password)
     with db() as con:
         try:
             row = con.execute(
@@ -93,7 +141,7 @@ def local_login(req: LoginReq):
                 SELECT id, is_active, is_admin, role FROM local_users
                 WHERE login=? AND password_hash=?
                 """,
-                (req.login, password_hash),
+                (login, password_hash),
             ).fetchone()
         except Exception:
             row = con.execute(
@@ -101,7 +149,7 @@ def local_login(req: LoginReq):
                 SELECT id, is_active, is_admin FROM local_users
                 WHERE login=? AND password_hash=?
                 """,
-                (req.login, password_hash),
+                (login, password_hash),
             ).fetchone()
     if not row or row["is_active"] != 1:
         raise HTTPException(401, "BAD_CREDENTIALS")
@@ -117,7 +165,7 @@ def local_login(req: LoginReq):
 
 @app.post("/local/logout")
 def local_logout(request: Request):
-    user_id = require_auth(request)
+    user_id = require_auth(request, allow_disabled=True)
     token = request.headers.get("X-Auth-Token")
     revoke_token(token)
     return {"ok": True, "user_id": user_id}
@@ -125,11 +173,16 @@ def local_logout(request: Request):
 
 @app.get("/local/me")
 def local_me(request: Request):
-    user_id = require_auth(request)
+    user_id = require_auth(request, allow_disabled=True)
     with db() as con:
         try:
             row = con.execute(
-                "SELECT id, login, is_admin, role, is_active, created_at FROM local_users WHERE id=?",
+                """
+                SELECT id, login, is_admin, role, is_active, created_at,
+                       service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment
+                FROM local_users
+                WHERE id=?
+                """,
                 (user_id,),
             ).fetchone()
         except Exception:
@@ -144,6 +197,11 @@ def local_me(request: Request):
     d["role"] = role_to_str(role)
     d["is_admin"] = bool(d.get("is_admin")) or role >= ROLE_ADMIN
     d["is_super_admin"] = role >= ROLE_SUPER_ADMIN
+    # capabilities (older DBs may not have these columns)
+    d["service_enabled"] = bool(_int01(d.get("service_enabled"), default=1))
+    d["feature_group_reading_enabled"] = bool(_int01(d.get("feature_group_reading_enabled"), default=1))
+    d["feature_auto_dialogs_enabled"] = bool(_int01(d.get("feature_auto_dialogs_enabled"), default=1))
+    d["disabled_comment"] = (d.get("disabled_comment") or "").strip()
     return d
 
 
@@ -191,7 +249,7 @@ AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT = int(os.getenv("AUTO_CHAT_MAX_ACTIVE_PER_ACCOU
 
 @app.get("/local/settings")
 def get_settings(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     with db() as con:
         row = con.execute(
             """
@@ -208,12 +266,26 @@ def get_settings(request: Request):
 
 @app.patch("/local/settings")
 def update_settings(req: SettingsReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     fields = []
     values = []
+    changed_keywords = False
     if req.keywords is not None:
+        # Normalize comma-separated keywords: trim, drop empties, de-dupe case-insensitively.
+        parts = [p.strip() for p in str(req.keywords or "").split(",")]
+        parts = [p for p in parts if p]
+        seen = set()
+        out = []
+        for p in parts:
+            k = p.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(p)
+        norm = ", ".join(out)
         fields.append("keywords=?")
-        values.append(req.keywords)
+        values.append(norm)
+        changed_keywords = True
     if req.is_active is not None:
         fields.append("is_active=?")
         values.append(1 if req.is_active else 0)
@@ -226,6 +298,54 @@ def update_settings(req: SettingsReq, request: Request):
             f"UPDATE local_user_settings SET {', '.join(fields)}, updated_at=? WHERE user_id=?",
             values,
         )
+        if changed_keywords:
+            # Recompute home_hidden so Home -> "Чтение групп" only shows matches that still match current keywords.
+            # Monitoring history must keep the full record, so we hide/unhide via a flag instead of deleting.
+            account_rows = con.execute(
+                "SELECT id FROM accounts WHERE local_user_id=?",
+                (user_id,),
+            ).fetchall()
+            account_ids = [int(r["id"]) for r in account_rows]
+            if account_ids:
+                placeholders = ",".join("?" for _ in account_ids)
+                kw = [k.lower() for k in out if k]
+                # Force a re-scan for listened groups so recent messages are re-evaluated under the new keywords.
+                # This is important when user changes keywords after the worker already advanced last_message_id.
+                con.execute(
+                    f"""
+                    UPDATE group_listeners
+                    SET last_message_id=NULL, updated_at=?
+                    WHERE account_id IN ({placeholders}) AND is_listening=1
+                    """,
+                    (now_iso(), *account_ids),
+                )
+                if not kw:
+                    con.execute(
+                        f"""
+                        UPDATE group_matches
+                        SET home_hidden=1
+                        WHERE account_id IN ({placeholders})
+                        """,
+                        (*account_ids,),
+                    )
+                else:
+                    # Whole-word/phrase match (case-insensitive), Unicode-aware.
+                    patterns = [re.compile(rf"(?<!\\w){re.escape(k)}(?!\\w)", re.IGNORECASE) for k in kw]
+                    rows = con.execute(
+                        f"""
+                        SELECT id, message_text
+                        FROM group_matches
+                        WHERE account_id IN ({placeholders})
+                        """,
+                        (*account_ids,),
+                    ).fetchall()
+                    for r in rows:
+                        text = r["message_text"] or ""
+                        ok = any(p.search(text) for p in patterns)
+                        con.execute(
+                            "UPDATE group_matches SET home_hidden=? WHERE id=?",
+                            (0 if ok else 1, r["id"]),
+                        )
     return {"ok": True}
 
 
@@ -237,7 +357,7 @@ def _normalize_username(value: str) -> str:
 
 @app.get("/local/auto_chat/usernames")
 def list_auto_chat_usernames(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     with db() as con:
         rows = con.execute(
             """
@@ -253,7 +373,7 @@ def list_auto_chat_usernames(request: Request):
 
 @app.post("/local/auto_chat/usernames")
 def add_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     usernames = [_normalize_username(u) for u in (req.usernames or [])]
     usernames = [u for u in usernames if u]
     usernames = list(dict.fromkeys(usernames))
@@ -347,7 +467,7 @@ def add_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
 
 @app.post("/local/auto_chat/usernames/delete")
 def delete_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     usernames = [_normalize_username(u) for u in (req.usernames or [])]
     usernames = [u for u in usernames if u]
     if not usernames:
@@ -366,7 +486,7 @@ def delete_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
 
 @app.post("/local/auto_chat/usernames/clear")
 def clear_auto_chat_usernames(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     with db() as con:
         con.execute(
             "DELETE FROM local_user_auto_chat_usernames WHERE user_id=?",
@@ -377,7 +497,7 @@ def clear_auto_chat_usernames(request: Request):
 
 @app.get("/local/auto_chat/settings")
 def get_auto_chat_settings(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     with db() as con:
         row = con.execute(
             """
@@ -413,7 +533,7 @@ def get_auto_chat_settings(request: Request):
 
 @app.patch("/local/auto_chat/settings")
 def update_auto_chat_settings(req: AutoChatSettingsReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     fields = []
     values = []
     if req.ai_instruction is not None:
@@ -456,7 +576,7 @@ def update_auto_chat_settings(req: AutoChatSettingsReq, request: Request):
 
 @app.get("/auto_chat/dialogs")
 def list_auto_chat_dialogs(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         return {"account_id": None, "limit": AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT, "active_count": 0, "items": []}
@@ -496,7 +616,7 @@ def list_auto_chat_messages(
     since: Optional[str] = Query(None),
     after_id: Optional[int] = Query(None, ge=0),
 ):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
@@ -548,7 +668,7 @@ def list_auto_chat_messages(
 
 @app.post("/auto_chat/dialogs/start")
 def start_auto_chat(req: AutoChatStartReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
@@ -624,7 +744,7 @@ def start_auto_chat(req: AutoChatStartReq, request: Request):
 
 @app.post("/auto_chat/dialogs/stop")
 def stop_auto_chat(req: AutoChatStopReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_AUTO_DIALOGS)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
@@ -710,8 +830,14 @@ def create_account(req: AccountCreateReq, request: Request):
                 """,
                 (req.display_name, req.phone, req.tags, now_iso(), now_iso(), user_id),
             )
+        except sqlite3.IntegrityError as e:
+            # Most common: phone must be unique.
+            if "UNIQUE constraint failed: accounts.phone" in str(e):
+                raise HTTPException(409, "PHONE_EXISTS")
+            raise HTTPException(400, "CREATE_FAILED")
         except Exception as e:
-            raise HTTPException(400, f"CREATE_FAILED: {type(e).__name__}: {e}")
+            logger.exception("account create failed")
+            raise HTTPException(400, "CREATE_FAILED")
         row = con.execute("SELECT last_insert_rowid() AS id").fetchone()
     return {"id": row["id"]}
 
@@ -946,7 +1072,7 @@ def list_dialogs(request: Request, type: str = Query("groups")):
 
 @app.get("/groups")
 def list_groups(request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     account_id, session_string = _get_active_account_session(user_id)
     if not account_id or not session_string:
         return {"account_id": None, "worker_id": None, "items": []}
@@ -984,10 +1110,24 @@ def list_groups(request: Request):
     else:
         items = cached_items
 
+    # Keep Home counters/history consistent with current keywords (whole-word matching),
+    # even if DB still contains older substring-based matches.
+    with db() as con:
+        srow = con.execute(
+            "SELECT keywords FROM local_user_settings WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        patterns = _compile_keywords_patterns_csv(srow["keywords"] if srow else "")
+        _sync_group_matches_home_hidden(con, account_id, patterns)
+
     with db() as con:
         rows = con.execute(
             """
-            SELECT gl.chat_id, gl.is_listening, gl.title, COUNT(DISTINCT gm.message_id) AS match_count
+            SELECT
+              gl.chat_id,
+              gl.is_listening,
+              gl.title,
+              COUNT(DISTINCT CASE WHEN COALESCE(gm.home_hidden, 0)=0 THEN gm.message_id END) AS match_count
             FROM group_listeners gl
             LEFT JOIN group_matches gm
               ON gm.account_id = gl.account_id AND gm.chat_id = gl.chat_id
@@ -1042,7 +1182,7 @@ def list_group_workers(request: Request, limit: int = Query(100, ge=1, le=500)):
 
 @app.post("/groups/{chat_id}/listen")
 def set_group_listen(chat_id: int, req: GroupListenReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
@@ -1070,16 +1210,45 @@ def set_group_listen(chat_id: int, req: GroupListenReq, request: Request):
 
 @app.get("/groups/{chat_id}/matches")
 def list_group_matches(chat_id: int, request: Request, limit: int = Query(50, ge=1, le=500)):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         return {"items": []}
     with db() as con:
+        srow = con.execute(
+            "SELECT keywords FROM local_user_settings WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        patterns = _compile_keywords_patterns_csv(srow["keywords"] if srow else "")
+        # Sync only for this chat (cheaper) so modal is always correct.
+        rows = con.execute(
+            "SELECT id, message_text FROM group_matches WHERE account_id=? AND chat_id=?",
+            (account_id, chat_id),
+        ).fetchall()
+        if not patterns:
+            con.execute(
+                "UPDATE group_matches SET home_hidden=1 WHERE account_id=? AND chat_id=?",
+                (account_id, chat_id),
+            )
+        else:
+            for r in rows:
+                text = r["message_text"] or ""
+                ok = any(p.search(text) for p in patterns)
+                con.execute(
+                    "UPDATE group_matches SET home_hidden=? WHERE id=?",
+                    (0 if ok else 1, r["id"]),
+                )
+    with db() as con:
         rows = con.execute(
             """
-            SELECT message_id, message_text, sender_phone, MAX(created_at) AS created_at
+            SELECT
+              message_id,
+              message_text,
+              sender_phone,
+              MAX(matched_keywords) AS matched_keywords,
+              MAX(created_at) AS created_at
             FROM group_matches
-            WHERE account_id=? AND chat_id=?
+            WHERE account_id=? AND chat_id=? AND COALESCE(home_hidden, 0)=0
             GROUP BY message_id, message_text, sender_phone
             ORDER BY MAX(id) DESC
             LIMIT ?
@@ -1091,25 +1260,110 @@ def list_group_matches(chat_id: int, request: Request, limit: int = Query(50, ge
 
 @app.get("/groups/{chat_id}/matches/count")
 def count_group_matches(chat_id: int, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         return {"count": 0}
+    with db() as con:
+        srow = con.execute(
+            "SELECT keywords FROM local_user_settings WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        patterns = _compile_keywords_patterns_csv(srow["keywords"] if srow else "")
+        # Keep counter consistent with modal list.
+        rows = con.execute(
+            "SELECT id, message_text FROM group_matches WHERE account_id=? AND chat_id=?",
+            (account_id, chat_id),
+        ).fetchall()
+        if not patterns:
+            con.execute(
+                "UPDATE group_matches SET home_hidden=1 WHERE account_id=? AND chat_id=?",
+                (account_id, chat_id),
+            )
+        else:
+            for r in rows:
+                text = r["message_text"] or ""
+                ok = any(p.search(text) for p in patterns)
+                con.execute(
+                    "UPDATE group_matches SET home_hidden=? WHERE id=?",
+                    (0 if ok else 1, r["id"]),
+                )
     with db() as con:
         row = con.execute(
             """
             SELECT COUNT(DISTINCT message_id) AS cnt
             FROM group_matches
-            WHERE account_id=? AND chat_id=?
+            WHERE account_id=? AND chat_id=? AND COALESCE(home_hidden, 0)=0
             """,
             (account_id, chat_id),
         ).fetchone()
     return {"count": row["cnt"]}
 
 
+@app.post("/groups/{chat_id}/matches/hide_home")
+def hide_group_matches_home(chat_id: int, request: Request):
+    """
+    Hide found matches from Home -> "Чтение групп" without deleting them from Monitoring history.
+    """
+    user_id = require_feature(request, FEATURE_GROUP_READING)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
+    with db() as con:
+        con.execute(
+            """
+            UPDATE group_matches
+            SET home_hidden=1
+            WHERE account_id=? AND chat_id=? AND COALESCE(home_hidden, 0)=0
+            """,
+            (account_id, chat_id),
+        )
+        row = con.execute("SELECT changes() AS n").fetchone()
+    return {"ok": True, "hidden": int(row["n"] or 0)}
+
+
+@app.get("/group_matches")
+def list_group_matches_history(
+    request: Request,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """
+    User-facing "listening history": matches found across all chats for the ACTIVE telegram account only.
+    Admins have a separate endpoint that can list matches across all accounts.
+    """
+    user_id = require_feature(request, FEATURE_GROUP_READING)
+    account_id, _ = _get_active_account_session(user_id)
+    if not account_id:
+        return {"account_id": None, "items": []}
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT
+              MAX(gm.id) AS id,
+              gm.chat_id,
+              COALESCE(gl.title, '') AS chat_title,
+              gm.message_id,
+              gm.message_text,
+              gm.sender_phone,
+              MAX(gm.matched_keywords) AS matched_keywords,
+              MAX(gm.created_at) AS created_at
+            FROM group_matches gm
+            LEFT JOIN group_listeners gl
+              ON gl.account_id = gm.account_id AND gl.chat_id = gm.chat_id
+            WHERE gm.account_id=?
+            GROUP BY gm.chat_id, gm.message_id, gm.message_text, gm.sender_phone
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (account_id, limit, offset),
+        ).fetchall()
+    return {"account_id": account_id, "items": [dict(r) for r in rows]}
+
+
 @app.post("/groups/{chat_id}/matches")
 def add_group_matches(chat_id: int, req: GroupMatchesReq, request: Request):
-    user_id = require_auth(request)
+    user_id = require_feature(request, FEATURE_GROUP_READING)
     account_id, _ = _get_active_account_session(user_id)
     if not account_id:
         raise HTTPException(400, "NO_ACTIVE_ACCOUNT")
@@ -1258,11 +1512,74 @@ def cancel_job(job_id: int, request: Request):
             ("CANCELLED", now_iso(), job_id),
         )
     return {"ok": True}
-def require_auth(request: Request) -> int:
+FEATURE_GROUP_READING = "group_reading"
+FEATURE_AUTO_DIALOGS = "auto_dialogs"
+
+
+def _get_user_caps(con: sqlite3.Connection, user_id: int) -> dict:
+    """
+    Returns local user capability flags.
+    Be defensive for older DBs that don't have these columns yet.
+    """
+    try:
+        row = con.execute(
+            """
+            SELECT service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment
+            FROM local_users
+            WHERE id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return {
+                "service_enabled": 1,
+                "feature_group_reading_enabled": 1,
+                "feature_auto_dialogs_enabled": 1,
+                "disabled_comment": None,
+            }
+        return dict(row)
+    except Exception:
+        return {
+            "service_enabled": 1,
+            "feature_group_reading_enabled": 1,
+            "feature_auto_dialogs_enabled": 1,
+            "disabled_comment": None,
+        }
+
+
+def _int01(value, default: int = 1) -> int:
+    """Convert SQLite-ish booleans (0/1/None/True/False/'0'/'1') to 0/1."""
+    if value is None:
+        return 1 if int(default) == 1 else 0
+    try:
+        return 1 if int(value) == 1 else 0
+    except Exception:
+        return 1 if bool(value) else 0
+
+
+def require_auth(request: Request, *, allow_disabled: bool = False) -> int:
     token = request.headers.get("X-Auth-Token")
     user_id = verify_token(token)
     if not user_id:
         raise HTTPException(401, "UNAUTHORIZED")
+    if allow_disabled:
+        return user_id
+    with db() as con:
+        caps = _get_user_caps(con, user_id)
+        if _int01(caps.get("service_enabled"), default=1) != 1:
+            comment = (caps.get("disabled_comment") or "").strip()
+            raise HTTPException(403, f"SERVICE_DISABLED{': ' + comment if comment else ''}")
+    return user_id
+
+
+def require_feature(request: Request, feature: str) -> int:
+    user_id = require_auth(request)
+    with db() as con:
+        caps = _get_user_caps(con, user_id)
+    if feature == FEATURE_GROUP_READING and _int01(caps.get("feature_group_reading_enabled"), default=0) != 1:
+        raise HTTPException(403, "FEATURE_DISABLED: group_reading")
+    if feature == FEATURE_AUTO_DIALOGS and _int01(caps.get("feature_auto_dialogs_enabled"), default=0) != 1:
+        raise HTTPException(403, "FEATURE_DISABLED: auto_dialogs")
     return user_id
 
 
@@ -1291,6 +1608,20 @@ class AdminUserCreateReq(BaseModel):
     role: Optional[str] = None  # "user" | "admin"
     is_admin: Optional[bool] = False
     is_active: Optional[bool] = True
+    service_enabled: Optional[bool] = True
+    feature_group_reading_enabled: Optional[bool] = True
+    feature_auto_dialogs_enabled: Optional[bool] = True
+    disabled_comment: Optional[str] = None
+
+
+class AdminUserUpdateReq(BaseModel):
+    # NOTE: role changes are restricted by actor permissions (see handler).
+    role: Optional[str] = None  # "user" | "admin"
+    is_active: Optional[bool] = None
+    service_enabled: Optional[bool] = None
+    feature_group_reading_enabled: Optional[bool] = None
+    feature_auto_dialogs_enabled: Optional[bool] = None
+    disabled_comment: Optional[str] = None
 
 
 @app.get("/admin/users")
@@ -1300,7 +1631,8 @@ def admin_list_users(request: Request):
         try:
             rows = con.execute(
                 """
-                SELECT id, login, is_admin, role, is_active, created_at, updated_at
+                SELECT id, login, is_admin, role, is_active, created_at, updated_at,
+                       service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment
                 FROM local_users
                 ORDER BY id DESC
                 """,
@@ -1312,6 +1644,10 @@ def admin_list_users(request: Request):
                 d["role"] = role_to_str(role)
                 d["is_admin"] = bool(d.get("is_admin")) or role >= ROLE_ADMIN
                 d["is_super_admin"] = role >= ROLE_SUPER_ADMIN
+                d["service_enabled"] = bool(_int01(d.get("service_enabled"), default=1))
+                d["feature_group_reading_enabled"] = bool(_int01(d.get("feature_group_reading_enabled"), default=1))
+                d["feature_auto_dialogs_enabled"] = bool(_int01(d.get("feature_auto_dialogs_enabled"), default=1))
+                d["disabled_comment"] = (d.get("disabled_comment") or "").strip()
                 items.append(d)
             return {"items": items}
         except Exception:
@@ -1347,15 +1683,32 @@ def admin_create_user(req: AdminUserCreateReq, request: Request):
 
     with db() as con:
         try:
+            # If service is disabled, also disable both features.
+            service_enabled = bool(req.service_enabled) if req.service_enabled is not None else True
+            fg = bool(req.feature_group_reading_enabled) if req.feature_group_reading_enabled is not None else True
+            fa = bool(req.feature_auto_dialogs_enabled) if req.feature_auto_dialogs_enabled is not None else True
+            comment = (req.disabled_comment or "").strip() or None
+            if not service_enabled:
+                fg = False
+                fa = False
             user_id = create_local_user(
                 con,
                 login=req.login,
                 password_hash=password_hash,
                 role=desired_role,
                 is_active=bool(req.is_active),
+                service_enabled=service_enabled,
+                feature_group_reading_enabled=fg,
+                feature_auto_dialogs_enabled=fa,
+                disabled_comment=comment,
             )
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: local_users.login" in str(e):
+                raise HTTPException(409, "LOGIN_EXISTS")
+            raise HTTPException(400, "CREATE_FAILED")
         except Exception as e:
-            raise HTTPException(400, f"CREATE_FAILED: {type(e).__name__}: {e}")
+            logger.exception("admin user create failed")
+            raise HTTPException(400, "CREATE_FAILED")
     return {"id": user_id}
 
 
@@ -1397,6 +1750,123 @@ def admin_delete_user(user_id: int, request: Request, confirm: bool = Query(Fals
         con.execute("DELETE FROM local_user_auto_chat_usernames WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM local_user_auto_chat_settings WHERE user_id=?", (user_id,))
         con.execute("DELETE FROM local_users WHERE id=?", (user_id,))
+    return {"ok": True}
+
+
+@app.patch("/admin/users/{user_id}")
+def admin_update_user(user_id: int, req: AdminUserUpdateReq, request: Request):
+    actor_id = require_admin(request)
+    with db() as con:
+        actor_role = get_user_role(con, actor_id)
+        target = con.execute(
+            """
+            SELECT id, is_admin, role
+            FROM local_users
+            WHERE id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "USER_NOT_FOUND")
+        target_role = get_user_role(con, user_id)
+        if not can_delete_target(actor_role, target_role):
+            raise HTTPException(403, "FORBIDDEN")
+
+        fields = []
+        values: list[object] = []
+
+        if req.is_active is not None:
+            fields.append("is_active=?")
+            values.append(1 if bool(req.is_active) else 0)
+
+        if req.role is not None:
+            desired = req.role.strip().lower()
+            if desired not in ("user", "admin"):
+                raise HTTPException(400, "INVALID_ROLE")
+            desired_role = ROLE_ADMIN if desired == "admin" else ROLE_USER
+            if desired_role == ROLE_ADMIN and not can_create_admins(actor_role):
+                raise HTTPException(403, "SUPER_ADMIN_ONLY")
+            # never allow setting superadmin via this endpoint
+            fields.append("role=?")
+            values.append(int(desired_role))
+            fields.append("is_admin=?")
+            values.append(1 if int(desired_role) >= ROLE_ADMIN else 0)
+
+        # Capabilities
+        service_enabled = None
+        if req.service_enabled is not None:
+            service_enabled = bool(req.service_enabled)
+            fields.append("service_enabled=?")
+            values.append(1 if service_enabled else 0)
+
+        if req.feature_group_reading_enabled is not None:
+            fields.append("feature_group_reading_enabled=?")
+            values.append(1 if bool(req.feature_group_reading_enabled) else 0)
+
+        if req.feature_auto_dialogs_enabled is not None:
+            fields.append("feature_auto_dialogs_enabled=?")
+            values.append(1 if bool(req.feature_auto_dialogs_enabled) else 0)
+
+        if req.disabled_comment is not None:
+            fields.append("disabled_comment=?")
+            values.append((req.disabled_comment or "").strip() or None)
+
+        if not fields:
+            return {"ok": True}
+
+        fields.append("updated_at=?")
+        values.append(now_iso())
+        values.append(user_id)
+
+        # Apply update.
+        con.execute(
+            f"UPDATE local_users SET {', '.join(fields)} WHERE id=?",
+            values,
+        )
+
+        # Stop feature activity if the user lost access to it (service disabled or feature disabled).
+        caps_row = con.execute(
+            """
+            SELECT service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled
+            FROM local_users
+            WHERE id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        caps = dict(caps_row) if caps_row else {}
+        svc_on = _int01(caps.get("service_enabled", 1), default=1) == 1
+        gr_on = _int01(caps.get("feature_group_reading_enabled", 1), default=1) == 1
+        au_on = _int01(caps.get("feature_auto_dialogs_enabled", 1), default=1) == 1
+
+        if not svc_on or not gr_on or not au_on:
+            acc_rows = con.execute("SELECT id FROM accounts WHERE local_user_id=?", (user_id,)).fetchall()
+            account_ids = [int(r["id"]) for r in acc_rows]
+            if account_ids:
+                ph = ",".join("?" for _ in account_ids)
+                if not svc_on or not gr_on:
+                    con.execute(
+                        f"UPDATE group_listeners SET is_listening=0, updated_at=? WHERE account_id IN ({ph})",
+                        (now_iso(), *account_ids),
+                    )
+                if not svc_on or not au_on:
+                    con.execute(
+                        f"""
+                        UPDATE auto_chat_dialogs
+                        SET status=?, last_error=?, pending_incoming=0, updated_at=?, stopped_at=COALESCE(stopped_at, ?)
+                        WHERE account_id IN ({ph}) AND status IN (?, ?, ?)
+                        """,
+                        (
+                            AUTO_CHAT_STATUS_STOPPED,
+                            "FEATURE_DISABLED" if svc_on else "SERVICE_DISABLED",
+                            now_iso(),
+                            now_iso(),
+                            *account_ids,
+                            AUTO_CHAT_STATUS_STARTING,
+                            AUTO_CHAT_STATUS_WAIT_REPLY,
+                            AUTO_CHAT_STATUS_ACTIVE,
+                        ),
+                    )
+
     return {"ok": True}
 
 
@@ -1446,6 +1916,7 @@ def admin_delete_account(account_id: int, request: Request, confirm: bool = Quer
 @app.get("/admin/group_workers")
 def admin_group_workers(request: Request, account_id: Optional[int] = None, limit: int = Query(200, ge=1, le=1000)):
     require_admin(request)
+    require_feature(request, FEATURE_GROUP_READING)
     with db() as con:
         if account_id:
             rows = con.execute(
@@ -1480,6 +1951,7 @@ def admin_group_matches(
     offset: int = Query(0, ge=0),
 ):
     require_admin(request)
+    require_feature(request, FEATURE_GROUP_READING)
     params = []
     filters = []
     if account_id is not None:
@@ -1492,7 +1964,7 @@ def admin_group_matches(
     with db() as con:
         rows = con.execute(
             f"""
-            SELECT id, account_id, chat_id, message_id, message_text, sender_phone, created_at
+            SELECT id, account_id, chat_id, message_id, message_text, sender_phone, matched_keywords, created_at
             FROM group_matches
             {where}
             ORDER BY id DESC
@@ -1501,6 +1973,108 @@ def admin_group_matches(
             (*params, limit, offset),
         ).fetchall()
     return {"items": [dict(r) for r in rows]}
+
+
+@app.get("/admin/auto_chat/dialogs")
+def admin_list_auto_chat_dialogs(
+    request: Request,
+    account_id: Optional[int] = None,
+):
+    require_admin(request)
+    require_feature(request, FEATURE_AUTO_DIALOGS)
+    with db() as con:
+        if account_id is not None:
+            rows = con.execute(
+                """
+                SELECT id, account_id, peer_tg_user_id, peer_username, peer_display_name,
+                       status, last_error, pending_incoming, last_ai_request_at, last_ai_latency_ms,
+                       created_at, updated_at, started_at, stopped_at
+                FROM auto_chat_dialogs
+                WHERE account_id=?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (account_id,),
+            ).fetchall()
+            active_count = con.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM auto_chat_dialogs
+                WHERE account_id=? AND status IN ({",".join(["?"]*len(AUTO_CHAT_ACTIVE_STATUSES))})
+                """,
+                (account_id, *AUTO_CHAT_ACTIVE_STATUSES),
+            ).fetchone()["cnt"]
+        else:
+            rows = con.execute(
+                """
+                SELECT id, account_id, peer_tg_user_id, peer_username, peer_display_name,
+                       status, last_error, pending_incoming, last_ai_request_at, last_ai_latency_ms,
+                       created_at, updated_at, started_at, stopped_at
+                FROM auto_chat_dialogs
+                ORDER BY updated_at DESC, id DESC
+                """,
+            ).fetchall()
+            active_count = con.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM auto_chat_dialogs
+                WHERE status IN ({",".join(["?"]*len(AUTO_CHAT_ACTIVE_STATUSES))})
+                """,
+                (*AUTO_CHAT_ACTIVE_STATUSES,),
+            ).fetchone()["cnt"]
+    return {
+        "account_id": account_id,
+        "limit": AUTO_CHAT_MAX_ACTIVE_PER_ACCOUNT,
+        "active_count": int(active_count or 0),
+        "items": [dict(r) for r in rows],
+    }
+
+
+@app.get("/admin/auto_chat/dialogs/{dialog_id}/messages")
+def admin_list_auto_chat_messages(
+    dialog_id: int,
+    request: Request,
+    limit: int = Query(200, ge=1, le=2000),
+    since: Optional[str] = Query(None),
+    after_id: Optional[int] = Query(None, ge=0),
+):
+    require_admin(request)
+    require_feature(request, FEATURE_AUTO_DIALOGS)
+    with db() as con:
+        where = ["dialog_id=?"]
+        params: list[object] = [dialog_id]
+        if since:
+            where.append("created_at>=?")
+            params.append(since)
+        if after_id is not None:
+            where.append("id>?")
+            params.append(int(after_id))
+
+        if after_id is not None:
+            rows = con.execute(
+                f"""
+                SELECT id, direction, text, tg_message_id, created_at
+                FROM auto_chat_messages
+                WHERE {' AND '.join(where)}
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                f"""
+                SELECT id, direction, text, tg_message_id, created_at
+                FROM auto_chat_messages
+                WHERE {' AND '.join(where)}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+    items = [dict(r) for r in rows]
+    if after_id is None:
+        items.reverse()
+    return {"dialog_id": dialog_id, "items": items}
 
 
 @app.get("/requisites")
