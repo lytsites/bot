@@ -6,5 +6,8 @@ set "FRONTEND_ORIGINS=https://prok.services,http://prok.services,https://node.e-
 set "DB_PATH=%cd%\var\data.sqlite3"
 set "LOG_PATH=%cd%\var\logs\app.log"
 
-py -3.11 -m uvicorn main_api.main:app --host 0.0.0.0 --port 8000
+set "PY=python"
+py -3.11 -V >nul 2>nul && set "PY=py -3.11"
+
+%PY% -m uvicorn main_api.main:app --host 0.0.0.0 --port 8000
 pause
