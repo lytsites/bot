@@ -42,6 +42,8 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('')
   const [loginErr, setLoginErr] = useState('')
   const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [tgSessionExpiredOpen, setTgSessionExpiredOpen] = useState(false)
+  const [tgSessionExpiredText, setTgSessionExpiredText] = useState('')
   const [activeTopTab, setActiveTopTab] = useState(() => {
     try {
       const saved = localStorage.getItem('activeTopTab')
@@ -106,6 +108,12 @@ export default function App() {
   const [adminUsers, setAdminUsers] = useState([])
   const [adminAccounts, setAdminAccounts] = useState([])
   const [adminWorkers, setAdminWorkers] = useState([])
+  const [adminErrors, setAdminErrors] = useState([])
+  const [adminErrorsOffset, setAdminErrorsOffset] = useState(0)
+  const [adminErrorsLimit] = useState(20)
+  const [adminErrorsTotal, setAdminErrorsTotal] = useState(0)
+  const [adminErrorsErr, setAdminErrorsErr] = useState('')
+  const [adminErrorsLoading, setAdminErrorsLoading] = useState(false)
   const [adminMatches, setAdminMatches] = useState([])
   const [adminMatchesOffset, setAdminMatchesOffset] = useState(0)
   const [adminMatchesLimit, setAdminMatchesLimit] = useState(10)
@@ -242,6 +250,8 @@ export default function App() {
     CODE_INVALID: 'Неверный код',
     PHONE_CODE_INVALID: 'Неверный код',
     PHONE_NUMBER_INVALID: 'Неверный номер телефона',
+    TG_SESSION_EXPIRED: 'Сессия Telegram истекла. Переавторизуйтесь',
+    LOGIN_RATE_LIMITED: 'Слишком много попыток входа. Попробуйте позже',
   }
 
   const formatError = err => {
@@ -390,9 +400,35 @@ export default function App() {
     setAdminAccounts(r.items || [])
   }
 
+  async function loadAdminUserLoginHistory(userId, limit = 10, offset = 0) {
+    const r = await mainGet(`/admin/users/${userId}/login_history?limit=${limit}&offset=${offset}`)
+    return {
+      items: r.items || [],
+      total: Number(r.total || 0),
+      limit: Number(r.limit || limit),
+      offset: Number(r.offset || offset),
+    }
+  }
+
   async function loadAdminWorkers() {
     const r = await mainGet('/admin/group_workers')
     setAdminWorkers(r.items || [])
+  }
+
+  async function loadAdminErrors(offset = adminErrorsOffset, limit = adminErrorsLimit) {
+    setAdminErrorsErr('')
+    setAdminErrorsLoading(true)
+    try {
+      const r = await mainGet(`/admin/errors?limit=${limit}&offset=${offset}`)
+      setAdminErrors(r.items || [])
+      setAdminErrorsTotal(Number(r.total || 0))
+    } catch (e) {
+      setAdminErrorsErr(formatError(e))
+      setAdminErrors([])
+      setAdminErrorsTotal(0)
+    } finally {
+      setAdminErrorsLoading(false)
+    }
   }
 
   async function loadAdminMatches(offset = adminMatchesOffset, limit = adminMatchesLimit) {
@@ -879,6 +915,34 @@ export default function App() {
     setActiveAccountId(prev => (prev === nextId ? prev : nextId))
   }
 
+  async function handleTelegramSessionExpired() {
+    setTgSessionExpiredText('Сессия Telegram истекла или была отозвана. Пожалуйста, авторизуйтесь заново.')
+    setTgSessionExpiredOpen(true)
+    setAuthModalOpen(false)
+    setAccounts([])
+    setSessions([])
+    setJobs([])
+    setStats(null)
+    setGroups([])
+    setGroupMatchCounts({})
+    setGroupWorkers([])
+    setGroupWorkerId(null)
+    setSelectedGroupId(null)
+    setSelectedId(null)
+    setActiveAccountId(null)
+    await Promise.allSettled([
+      loadAccounts(),
+      loadActiveSession(),
+      loadStats(),
+      loadSessions(null),
+    ])
+  }
+
+  function handleTelegramReauthClick() {
+    setTgSessionExpiredOpen(false)
+    setAuthModalOpen(true)
+  }
+
   const parseUsernames = value =>
     (value || '')
       .split(/\r?\n/)
@@ -1314,7 +1378,7 @@ export default function App() {
   const monitoringAdminView =
     isAdmin &&
     activeTopTab === 'monitoring' &&
-    ['admin-accounts', 'admin-workers'].includes(monitorSideTab)
+    ['admin-accounts', 'admin-workers', 'admin-errors'].includes(monitorSideTab)
 
   useEffect(() => {
     if (!loggedIn) return
@@ -1406,9 +1470,9 @@ export default function App() {
   }, [isDarkTheme])
 
   useEffect(() => {
-    const hasModal = authModalOpen || showMatchesModal || systemBlockOpen
+    const hasModal = authModalOpen || showMatchesModal || systemBlockOpen || tgSessionExpiredOpen
     document.body.classList.toggle('modal-open', hasModal)
-  }, [authModalOpen, showMatchesModal, systemBlockOpen])
+  }, [authModalOpen, showMatchesModal, systemBlockOpen, tgSessionExpiredOpen])
 
   useEffect(() => {
     if (!systemBlockOpen) return
@@ -1469,9 +1533,16 @@ export default function App() {
   useEffect(() => {
     if (!isAdminChecked) return
     if (isAdmin) return
-    if (!['admin-accounts', 'admin-workers'].includes(monitorSideTab)) return
+    if (!['admin-accounts', 'admin-workers', 'admin-errors'].includes(monitorSideTab)) return
     setMonitorSideTab('listening_history')
   }, [isAdminChecked, isAdmin, monitorSideTab])
+
+  useEffect(() => {
+    if (!isAdminChecked) return
+    if (isSuperAdmin) return
+    if (monitorSideTab !== 'admin-errors') return
+    setMonitorSideTab('listening_history')
+  }, [isAdminChecked, isSuperAdmin, monitorSideTab])
 
   useEffect(() => {
     if (!isAdminChecked) return
@@ -1495,7 +1566,7 @@ export default function App() {
   }, [homeSideTab])
 
   useEffect(() => {
-    const allowed = new Set(['listening_history', 'auto_history', 'requisites_history', 'admin-accounts', 'admin-workers'])
+    const allowed = new Set(['listening_history', 'auto_history', 'requisites_history', 'admin-accounts', 'admin-workers', 'admin-errors'])
     if (!allowed.has(monitorSideTab)) {
       setMonitorSideTab('listening_history')
     }
@@ -1507,6 +1578,8 @@ export default function App() {
       resetMonitoringHistoryPaging()
     } else if (monitorSideTab === 'auto_history') {
       resetAutoChatHistorySelection()
+    } else if (monitorSideTab === 'admin-errors') {
+      setAdminErrorsOffset(0)
     }
   }, [monitorSideTab])
 
@@ -1614,6 +1687,12 @@ export default function App() {
       } else {
         loadHomeRequisites().catch(() => {})
       }
+      return
+    }
+
+    if (monitorSideTab === 'admin-errors') {
+      if (!isSuperAdmin) return
+      loadAdminErrors(adminErrorsOffset, adminErrorsLimit).catch(() => {})
     }
   }, [
     loggedIn,
@@ -1626,6 +1705,9 @@ export default function App() {
     monitoringListeningMatchesLimit,
     adminMatchesOffset,
     adminMatchesLimit,
+    adminErrorsOffset,
+    adminErrorsLimit,
+    isSuperAdmin,
   ])
 
   useEffect(() => {
@@ -1718,6 +1800,14 @@ export default function App() {
     const handler = () => resetAuthState()
     window.addEventListener('auth:expired', handler)
     return () => window.removeEventListener('auth:expired', handler)
+  }, [])
+
+  useEffect(() => {
+    const handler = () => {
+      handleTelegramSessionExpired().catch(() => {})
+    }
+    window.addEventListener('tg:session-expired', handler)
+    return () => window.removeEventListener('tg:session-expired', handler)
   }, [])
 
   useEffect(() => {
@@ -1823,6 +1913,8 @@ export default function App() {
     setMonitorSideTab('listening_history')
     setSettingsSideTab('main')
     setAuthModalOpen(false)
+    setTgSessionExpiredOpen(false)
+    setTgSessionExpiredText('')
     setAutoChatInput('')
     setAutoChatUsernames([])
     setAutoChatSelected([])
@@ -1907,11 +1999,23 @@ export default function App() {
     deleteAdminUser,
     adminAccounts,
     deleteAdminAccount,
+    loadAdminUserLoginHistory,
   }
 
   const adminWorkersProps = {
     adminWorkers,
     jobStatusMeta,
+  }
+
+  const adminErrorsProps = {
+    adminErrors,
+    adminErrorsOffset,
+    adminErrorsLimit,
+    adminErrorsTotal,
+    adminErrorsLoading,
+    adminErrorsErr,
+    setAdminErrorsOffset,
+    reloadAdminErrors: () => loadAdminErrors(adminErrorsOffset, adminErrorsLimit).catch(() => {}),
   }
 
   const settingsAccountsProps = {
@@ -2144,7 +2248,7 @@ export default function App() {
       </header>
 
       <div className="tabs tabs-row">
-        <div className="tabs-left">
+        <div className="tabs-left tabs-left-desktop">
           <button
             className={`tab ${activeTopTab === 'home' ? 'active' : ''}`}
             onClick={() => setActiveTopTab('home')}
@@ -2163,6 +2267,17 @@ export default function App() {
           >
             Настройки
           </button>
+        </div>
+        <div className="tabs-mobile-select-wrap">
+          <select
+            className="tabs-mobile-select"
+            value={activeTopTab}
+            onChange={e => setActiveTopTab(e.target.value)}
+          >
+            <option value="home">Главная</option>
+            <option value="monitoring">Мониторинг</option>
+            <option value="settings">Настройки</option>
+          </select>
         </div>
         <button className="tab active tab-logout" onClick={handleLogout}>Выйти</button>
       </div>
@@ -2189,6 +2304,7 @@ export default function App() {
           requisitesHistoryProps={monitoringRequisitesHistoryProps}
           adminAccountsProps={adminAccountsProps}
           adminWorkersProps={adminWorkersProps}
+          adminErrorsProps={adminErrorsProps}
           canGroupReading={featureGroupReadingEnabled}
           canAutoDialogs={featureAutoDialogsEnabled}
         />
@@ -2229,6 +2345,20 @@ export default function App() {
             </div>
             <h2 className="sys-block-title">{systemBlockTitle}</h2>
             <p className="muted sys-block-text">{systemBlockDetail}</p>
+          </div>
+        </div>
+      )}
+
+      {tgSessionExpiredOpen && (
+        <div className="modal-backdrop">
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2>Требуется переавторизация Telegram</h2>
+            </div>
+            <p className="muted">{tgSessionExpiredText}</p>
+            <div className="actions">
+              <button className="primary" onClick={handleTelegramReauthClick}>Переавторизоваться</button>
+            </div>
           </div>
         </div>
       )}

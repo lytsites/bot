@@ -28,6 +28,7 @@ from common.users import (
 from common.logging_setup import get_logger, request_id_middleware, setup_logging
 from telethon import TelegramClient
 from telethon.errors import UsernameInvalidError, UsernameNotOccupiedError
+from telethon.errors.rpcerrorlist import AuthKeyUnregisteredError
 from telethon.tl.types import User
 from telethon.sessions import StringSession
 
@@ -89,6 +90,89 @@ def _sync_group_matches_home_hidden(con: sqlite3.Connection, account_id: int, pa
 
 
 AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002").rstrip("/")
+LOGIN_RATE_WINDOW_MINUTES = int(os.getenv("LOGIN_RATE_WINDOW_MINUTES", "15"))
+LOGIN_RATE_MAX_FAILS_PER_LOGIN = int(os.getenv("LOGIN_RATE_MAX_FAILS_PER_LOGIN", "12"))
+LOGIN_RATE_MAX_FAILS_PER_IP = int(os.getenv("LOGIN_RATE_MAX_FAILS_PER_IP", "40"))
+
+
+def _client_ip(request: Request) -> str:
+    xfwd = (request.headers.get("x-forwarded-for") or "").strip()
+    if xfwd:
+        first = xfwd.split(",")[0].strip()
+        if first:
+            return first[:128]
+    real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip[:128]
+    if request.client and request.client.host:
+        return str(request.client.host)[:128]
+    return ""
+
+
+def _user_agent(request: Request) -> str:
+    return (request.headers.get("user-agent") or "").strip()[:512]
+
+
+def _current_login_fail_counts(con: sqlite3.Connection, login: str, ip: str) -> tuple[int, int]:
+    since = (datetime.utcnow() - timedelta(minutes=LOGIN_RATE_WINDOW_MINUTES)).isoformat()
+    login_fail_count = con.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM local_login_attempts
+        WHERE success=0
+          AND LOWER(login)=LOWER(?)
+          AND created_at>=?
+        """,
+        (login, since),
+    ).fetchone()["cnt"]
+    ip_fail_count = 0
+    if ip:
+        ip_fail_count = con.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM local_login_attempts
+            WHERE success=0
+              AND ip=?
+              AND created_at>=?
+            """,
+            (ip, since),
+        ).fetchone()["cnt"]
+    return int(login_fail_count or 0), int(ip_fail_count or 0)
+
+
+def _is_rate_limited(con: sqlite3.Connection, login: str, ip: str) -> bool:
+    login_fail_count, ip_fail_count = _current_login_fail_counts(con, login, ip)
+    return (
+        login_fail_count >= LOGIN_RATE_MAX_FAILS_PER_LOGIN
+        or ip_fail_count >= LOGIN_RATE_MAX_FAILS_PER_IP
+    )
+
+
+def _record_login_attempt(
+    con: sqlite3.Connection,
+    *,
+    login: str,
+    user_id: Optional[int],
+    ip: str,
+    user_agent: str,
+    success: bool,
+    reason: str,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO local_login_attempts(user_id, login, ip, user_agent, success, reason, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            login,
+            ip,
+            user_agent,
+            1 if success else 0,
+            reason,
+            now_iso(),
+        ),
+    )
 
 
 @app.get("/health")
@@ -128,13 +212,26 @@ class LoginReq(BaseModel):
 
 
 @app.post("/local/login")
-def local_login(req: LoginReq):
+def local_login(req: LoginReq, request: Request):
     login = (req.login or "").strip()
     password = req.password or ""
     if not login or not str(password).strip():
         raise HTTPException(400, "MISSING_FIELDS")
     password_hash = hash_password(password)
+    ip = _client_ip(request)
+    ua = _user_agent(request)
     with db() as con:
+        if _is_rate_limited(con, login, ip):
+            _record_login_attempt(
+                con,
+                login=login,
+                user_id=None,
+                ip=ip,
+                user_agent=ua,
+                success=False,
+                reason="LOGIN_RATE_LIMITED",
+            )
+            raise HTTPException(429, "LOGIN_RATE_LIMITED")
         try:
             row = con.execute(
                 """
@@ -152,7 +249,27 @@ def local_login(req: LoginReq):
                 (login, password_hash),
             ).fetchone()
     if not row or row["is_active"] != 1:
+        with db() as con:
+            _record_login_attempt(
+                con,
+                login=login,
+                user_id=int(row["id"]) if row else None,
+                ip=ip,
+                user_agent=ua,
+                success=False,
+                reason="BAD_CREDENTIALS",
+            )
         raise HTTPException(401, "BAD_CREDENTIALS")
+    with db() as con:
+        _record_login_attempt(
+            con,
+            login=login,
+            user_id=int(row["id"]),
+            ip=ip,
+            user_agent=ua,
+            success=True,
+            reason="OK",
+        )
     session = create_session(row["id"])
     role = int(row["role"] or (1 if row["is_admin"] else 0)) if "role" in row.keys() else (1 if row["is_admin"] else 0)
     return {
@@ -421,6 +538,8 @@ def add_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
                             "status": "NOT_FOUND",
                         }
                     )
+                except AuthKeyUnregisteredError:
+                    raise
                 except Exception:
                     results.append(
                         {
@@ -436,10 +555,13 @@ def add_auto_chat_usernames(req: AutoChatUsernamesReq, request: Request):
 
     try:
         import asyncio
-        resolved = asyncio.run(_resolve())
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-        resolved = loop.run_until_complete(_resolve())
+        try:
+            resolved = asyncio.run(_resolve())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            resolved = loop.run_until_complete(_resolve())
+    except AuthKeyUnregisteredError:
+        _handle_tg_session_expired(user_id, account_id)
 
     now = now_iso()
     with db() as con:
@@ -1062,10 +1184,13 @@ def list_dialogs(request: Request, type: str = Query("groups")):
 
     try:
         import asyncio
-        items = asyncio.run(_run())
-    except RuntimeError:
-        loop = asyncio.get_event_loop()
-        items = loop.run_until_complete(_run())
+        try:
+            items = asyncio.run(_run())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            items = loop.run_until_complete(_run())
+    except AuthKeyUnregisteredError:
+        _handle_tg_session_expired(user_id, account_id)
 
     return {"account_id": account_id, "items": items}
 
@@ -1102,12 +1227,31 @@ def list_groups(request: Request):
                 await client.disconnect()
 
         try:
-            items = asyncio.run(_run())
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            items = loop.run_until_complete(_run())
+            try:
+                items = asyncio.run(_run())
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                items = loop.run_until_complete(_run())
+        except AuthKeyUnregisteredError:
+            _handle_tg_session_expired(user_id, account_id)
         _upsert_group_catalog(account_id, items)
     else:
+        async def _validate_session():
+            client = TelegramClient(StringSession(session_string), TG_API_ID, TG_API_HASH)
+            await client.connect()
+            try:
+                await client.get_me()
+            finally:
+                await client.disconnect()
+
+        try:
+            try:
+                asyncio.run(_validate_session())
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(_validate_session())
+        except AuthKeyUnregisteredError:
+            _handle_tg_session_expired(user_id, account_id)
         items = cached_items
 
     # Keep Home counters/history consistent with current keywords (whole-word matching),
@@ -1661,6 +1805,43 @@ def admin_list_users(request: Request):
             return {"items": [dict(r) for r in rows]}
 
 
+@app.get("/admin/users/{user_id}/login_history")
+def admin_user_login_history(
+    user_id: int,
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    require_admin(request)
+    with db() as con:
+        user = con.execute(
+            "SELECT id, login FROM local_users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+        if not user:
+            raise HTTPException(404, "USER_NOT_FOUND")
+        total = con.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM local_login_attempts
+            WHERE user_id=? OR LOWER(login)=LOWER(?)
+            """,
+            (user_id, user["login"]),
+        ).fetchone()["cnt"]
+        rows = con.execute(
+            """
+            SELECT id, user_id, login, ip, user_agent, success, reason, created_at
+            FROM local_login_attempts
+            WHERE user_id=? OR LOWER(login)=LOWER(?)
+            ORDER BY id DESC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (user_id, user["login"], limit, offset),
+        ).fetchall()
+    return {"user_id": user_id, "total": int(total or 0), "limit": limit, "offset": offset, "items": [dict(r) for r in rows]}
+
+
 @app.post("/admin/users")
 def admin_create_user(req: AdminUserCreateReq, request: Request):
     actor_id = require_admin(request)
@@ -1942,6 +2123,123 @@ def admin_group_workers(request: Request, account_id: Optional[int] = None, limi
     return {"items": [dict(r) for r in rows]}
 
 
+@app.get("/admin/errors")
+def admin_errors(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    require_super_admin(request)
+    with db() as con:
+        total = con.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM (
+                SELECT e.id
+                FROM events e
+                WHERE UPPER(COALESCE(e.level, ''))='ERROR'
+                UNION ALL
+                SELECT j.id
+                FROM jobs j
+                WHERE j.status='FAILED' OR COALESCE(j.last_error, '')<>''
+                UNION ALL
+                SELECT gwr.id
+                FROM group_worker_runs gwr
+                WHERE COALESCE(gwr.last_error, '')<>''
+                UNION ALL
+                SELECT d.id
+                FROM auto_chat_dialogs d
+                WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+            ) t
+            """
+        ).fetchone()["cnt"]
+
+        rows = con.execute(
+            """
+            SELECT *
+            FROM (
+                SELECT
+                    e.id AS source_id,
+                    e.created_at AS created_at,
+                    'events' AS source,
+                    e.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    u.login AS local_login,
+                    UPPER(COALESCE(e.level, 'ERROR')) AS level,
+                    e.message AS message,
+                    NULL AS context
+                FROM events e
+                LEFT JOIN accounts a ON a.id = e.account_id
+                LEFT JOIN local_users u ON u.id = a.local_user_id
+                WHERE UPPER(COALESCE(e.level, ''))='ERROR'
+
+                UNION ALL
+
+                SELECT
+                    j.id AS source_id,
+                    j.updated_at AS created_at,
+                    'jobs' AS source,
+                    j.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    u.login AS local_login,
+                    CASE WHEN j.status='FAILED' THEN 'ERROR' ELSE 'WARN' END AS level,
+                    COALESCE(j.last_error, 'JOB_FAILED') AS message,
+                    ('type=' || COALESCE(j.type, '') || '; status=' || COALESCE(j.status, '')) AS context
+                FROM jobs j
+                LEFT JOIN accounts a ON a.id = j.account_id
+                LEFT JOIN local_users u ON u.id = a.local_user_id
+                WHERE j.status='FAILED' OR COALESCE(j.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    gwr.id AS source_id,
+                    COALESCE(gwr.stopped_at, gwr.started_at) AS created_at,
+                    'group_worker_runs' AS source,
+                    gwr.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    u.login AS local_login,
+                    'ERROR' AS level,
+                    gwr.last_error AS message,
+                    ('status=' || COALESCE(gwr.status, '')) AS context
+                FROM group_worker_runs gwr
+                LEFT JOIN accounts a ON a.id = gwr.account_id
+                LEFT JOIN local_users u ON u.id = a.local_user_id
+                WHERE COALESCE(gwr.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    d.id AS source_id,
+                    d.updated_at AS created_at,
+                    'auto_chat_dialogs' AS source,
+                    d.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    u.login AS local_login,
+                    CASE WHEN d.status='ERROR' THEN 'ERROR' ELSE 'WARN' END AS level,
+                    COALESCE(d.last_error, 'AUTO_CHAT_ERROR') AS message,
+                    (
+                        'status=' || COALESCE(d.status, '')
+                        || '; peer=' || COALESCE(d.peer_username, CAST(d.peer_tg_user_id AS TEXT), '')
+                    ) AS context
+                FROM auto_chat_dialogs d
+                LEFT JOIN accounts a ON a.id = d.account_id
+                LEFT JOIN local_users u ON u.id = a.local_user_id
+                WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+            ) x
+            ORDER BY x.created_at DESC, x.source_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return {
+        "items": [dict(r) for r in rows],
+        "total": int(total or 0),
+        "limit": int(limit),
+        "offset": int(offset),
+    }
+
+
 @app.get("/admin/group_matches")
 def admin_group_matches(
     request: Request,
@@ -2167,6 +2465,52 @@ def _get_active_account_session(local_user_id: int):
     if not row:
         return None, None
     return row["account_id"], decrypt_text(row["session_string"])
+
+
+def _delete_account_related_data(con: sqlite3.Connection, account_id: int) -> None:
+    con.execute("DELETE FROM tg_sessions WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM auth_flows WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM events WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM jobs WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM group_listeners WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM group_matches WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM group_catalog WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM group_worker_runs WHERE account_id=?", (account_id,))
+    con.execute(
+        "DELETE FROM auto_chat_messages WHERE dialog_id IN (SELECT id FROM auto_chat_dialogs WHERE account_id=?)",
+        (account_id,),
+    )
+    con.execute("DELETE FROM auto_chat_dialogs WHERE account_id=?", (account_id,))
+    con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+
+
+def _unlink_expired_telegram_account(local_user_id: int, account_id: int) -> bool:
+    with db() as con:
+        row = con.execute(
+            "SELECT id FROM accounts WHERE id=? AND local_user_id=?",
+            (account_id, local_user_id),
+        ).fetchone()
+        if not row:
+            return False
+        _delete_account_related_data(con, account_id)
+        return True
+
+
+def _handle_tg_session_expired(local_user_id: int, account_id: int) -> None:
+    logger.warning(
+        "Telegram session expired: local_user_id=%s account_id=%s",
+        local_user_id,
+        account_id,
+    )
+    try:
+        _unlink_expired_telegram_account(local_user_id, account_id)
+    except Exception:
+        logger.exception(
+            "Failed to cleanup expired Telegram account: local_user_id=%s account_id=%s",
+            local_user_id,
+            account_id,
+        )
+    raise HTTPException(401, "TG_SESSION_EXPIRED")
 
 
 def _get_cached_groups(account_id: int, max_age_sec: int):

@@ -5,6 +5,7 @@ import HomeAutoChatHistory from '../sideTabs/HomeAutoChatHistory'
 import HomeRequisitesHistory from '../sideTabs/HomeRequisitesHistory'
 import MonitoringAdminAccounts from '../sideTabs/MonitoringAdminAccounts'
 import MonitoringAdminWorkers from '../sideTabs/MonitoringAdminWorkers'
+import MonitoringAdminErrors from '../sideTabs/MonitoringAdminErrors'
 
 export default function MonitoringTab({
   isAdmin,
@@ -16,6 +17,7 @@ export default function MonitoringTab({
   requisitesHistoryProps,
   adminAccountsProps,
   adminWorkersProps,
+  adminErrorsProps,
   canGroupReading = true,
   canAutoDialogs = true,
 }) {
@@ -30,6 +32,9 @@ export default function MonitoringTab({
       { id: 'admin-workers', label: 'История воркеров' }
     )
   }
+  if (isSuperAdmin) {
+    items.push({ id: 'admin-errors', label: 'Ошибки' })
+  }
 
   return (
     <div className="workspace">
@@ -43,6 +48,9 @@ export default function MonitoringTab({
         )}
         {activeSideTab === 'admin-workers' && isAdmin && (
           <MonitoringAdminWorkers {...adminWorkersProps} />
+        )}
+        {activeSideTab === 'admin-errors' && isSuperAdmin && (
+          <MonitoringAdminErrors {...adminErrorsProps} />
         )}
       </div>
     </div>

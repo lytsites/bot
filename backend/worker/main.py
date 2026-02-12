@@ -109,8 +109,13 @@ class ClientManager:
         if state:
             try:
                 await state.client.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "invalidate_session disconnect failed account_id=%s err=%s: %s",
+                    account_id,
+                    type(exc).__name__,
+                    exc,
+                )
         self._revoke_active_sessions(account_id)
 
     @staticmethod
@@ -293,7 +298,14 @@ class Worker:
                             continue
                         try:
                             client = await self.client_manager.get_client(account_id)
+                        except RuntimeError as e:
+                            logger.info("listener skip account_id=%s reason=%s", account_id, e)
+                            continue
+                        except AuthKeyUnregisteredError:
+                            await self.client_manager.invalidate_session(account_id)
+                            continue
                         except Exception:
+                            logger.exception("listener get_client failed account_id=%s", account_id)
                             continue
 
                         dialog_map = await self._get_dialog_map(account_id, client, {r["chat_id"] for r in group_rows})
@@ -358,7 +370,14 @@ class Worker:
                 for account_id in self._load_accounts_with_active_auto_chat_dialogs():
                     try:
                         client = await self.client_manager.get_client(account_id)
+                    except RuntimeError as e:
+                        logger.info("autochat skip handler account_id=%s reason=%s", account_id, e)
+                        continue
+                    except AuthKeyUnregisteredError:
+                        await self.client_manager.invalidate_session(account_id)
+                        continue
                     except Exception:
+                        logger.exception("autochat get_client for handler failed account_id=%s", account_id)
                         continue
                     self._ensure_auto_chat_handler(account_id, client)
 
@@ -376,7 +395,14 @@ class Worker:
                 for account_id, dialogs in by_account.items():
                     try:
                         client = await self.client_manager.get_client(account_id)
+                    except RuntimeError as e:
+                        logger.info("autochat skip greetings account_id=%s reason=%s", account_id, e)
+                        continue
+                    except AuthKeyUnregisteredError:
+                        await self.client_manager.invalidate_session(account_id)
+                        continue
                     except Exception:
+                        logger.exception("autochat get_client for greetings failed account_id=%s", account_id)
                         continue
 
                     self._ensure_auto_chat_handler(account_id, client)
@@ -476,7 +502,14 @@ class Worker:
         for account_id, dialogs in by_account.items():
             try:
                 client = await self.client_manager.get_client(account_id)
+            except RuntimeError as e:
+                logger.info("autochat skip pending account_id=%s reason=%s", account_id, e)
+                continue
+            except AuthKeyUnregisteredError:
+                await self.client_manager.invalidate_session(account_id)
+                continue
             except Exception:
+                logger.exception("autochat get_client for pending failed account_id=%s", account_id)
                 continue
 
             self._ensure_auto_chat_handler(account_id, client)
@@ -692,8 +725,14 @@ class Worker:
                     s = self._load_auto_chat_settings_for_account(account_id)
                     if int(s.get("read_enabled") or 0) == 1:
                         await client.send_read_acknowledge(sender_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "autochat read_ack failed account_id=%s sender_id=%s err=%s: %s",
+                        account_id,
+                        sender_id,
+                        type(exc).__name__,
+                        exc,
+                    )
         except FloodWaitError as e:
             await asyncio.sleep(int(getattr(e, "seconds", 3)) + 1)
         except Exception as e:
@@ -707,8 +746,13 @@ class Worker:
                             "UPDATE auto_chat_dialogs SET status=?, last_error=?, updated_at=? WHERE id=?",
                             (AUTO_CHAT_STATUS_ERROR, f"{type(e).__name__}: {e}", now_iso(), dialog_id),
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "autochat failed to persist dialog error account_id=%s err=%s: %s",
+                    account_id,
+                    type(exc).__name__,
+                    exc,
+                )
 
     async def _handle_pending_dialog(self, account_id: int, client: TelegramClient, dialog: dict) -> None:
         dialog_id = dialog["id"]
@@ -1105,7 +1149,13 @@ class Worker:
         try:
             sender = await client.get_entity(sender_id)
             return getattr(sender, "phone", None)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "sender phone resolve failed sender_id=%s err=%s: %s",
+                sender_id,
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     def _extract_requisites(self, text: str) -> List[dict]:

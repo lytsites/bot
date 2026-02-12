@@ -50,6 +50,13 @@ async function request(base, path, options = {}, withAuth = true) {
     }
     const code = (detail.split(':')[0] || '').trim() || detail.trim()
 
+    if (withAuth && code === 'TG_SESSION_EXPIRED') {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('tg:session-expired', { detail: { code, message: detail } }))
+      }
+      throw new Error('TG_SESSION_EXPIRED')
+    }
+
     // Only treat as "auth expired" when we actually sent a token and server says UNAUTHORIZED.
     if (res.status === 401 && withAuth && token && (code === 'UNAUTHORIZED' || !code)) {
       setAuthToken('')

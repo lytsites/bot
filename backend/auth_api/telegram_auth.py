@@ -263,6 +263,7 @@ def start_auth(phone: str | None, local_user_id: int) -> dict:
                 )
             return {"auth_id": auth_id, "status": STATUS_CODE_SENT}
         except Exception:
+            logger.exception("auth.start failed auth_id=%s", auth_id)
             _set_error(auth_id, "START_FAILED")
             raise
         finally:
@@ -371,6 +372,7 @@ def submit_code(auth_id: str, code: str) -> dict:
 
             return {"auth_id": auth_id, "status": STATUS_READY}
         except Exception:
+            logger.exception("auth.code failed auth_id=%s", auth_id)
             _set_error(auth_id, "CODE_FAILED")
             account_id = row["account_id"] if row and "account_id" in row.keys() else None
             _log_event(account_id, "ERROR", "auth code failed")
@@ -569,6 +571,7 @@ def submit_password(auth_id: str, password: str) -> dict:
                 return _run_qr(_run_qr_password(row))
             return asyncio.run(_run_code(row))
         except Exception:
+            logger.exception("auth.password failed auth_id=%s method=%s", auth_id, row["method"])
             _set_error(auth_id, "PASSWORD_FAILED")
             account_id = row["account_id"] if row and "account_id" in row.keys() else None
             _log_event(account_id, "ERROR", "auth password failed")
@@ -703,6 +706,7 @@ async def _qr_wait_for_login(auth_id: str) -> None:
         _qr_disconnect(auth_id)
         return
     except Exception:
+        logger.exception("auth.qr wait failed auth_id=%s", auth_id)
         _set_error(auth_id, "QR_WAIT_FAILED")
         await _qr_disconnect_async(auth_id)
         return
@@ -779,6 +783,7 @@ async def _qr_wait_for_login(auth_id: str) -> None:
                 )
         await _db_write_with_timeout(_write, timeout=10.0)
     except Exception:
+        logger.exception("auth.qr finalize failed auth_id=%s", auth_id)
         _set_error(auth_id, "QR_FINALIZE_FAILED")
     finally:
         await _qr_disconnect_async(auth_id)

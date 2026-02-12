@@ -75,7 +75,7 @@ export default function HomeListening({
             ))}
           </div>
 
-          <div className="details">
+          <div className="details details-mobile-sheet">
             <div className="subcard">
               <h3>Группа</h3>
               <p className="muted">

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 
 export default function MonitoringAdminAccounts({
   isSuperAdmin,
@@ -19,6 +19,7 @@ export default function MonitoringAdminAccounts({
   deleteAdminUser,
   adminAccounts,
   deleteAdminAccount,
+  loadAdminUserLoginHistory,
 }) {
   const [roleFilter, setRoleFilter] = useState('all') // all|user|admin|superadmin
   const [edits, setEdits] = useState({}) // userId -> { mode, is_active }
@@ -27,6 +28,12 @@ export default function MonitoringAdminAccounts({
   const [commentModalOpen, setCommentModalOpen] = useState(false)
   const [commentModalUser, setCommentModalUser] = useState(null)
   const [commentDraft, setCommentDraft] = useState('')
+  const [loginHistory, setLoginHistory] = useState([])
+  const [loginHistoryLoading, setLoginHistoryLoading] = useState(false)
+  const [loginHistoryErr, setLoginHistoryErr] = useState('')
+  const [loginHistoryTotal, setLoginHistoryTotal] = useState(0)
+  const [loginHistoryPage, setLoginHistoryPage] = useState(0)
+  const LOGIN_HISTORY_PAGE_SIZE = 10
 
   const roleMeta = u => {
     const role = String(u?.role || '').toLowerCase()
@@ -104,6 +111,7 @@ export default function MonitoringAdminAccounts({
   const openUserModal = u => {
     if (!u) return
     setUserModalUser(u)
+    setLoginHistoryPage(0)
     setUserModalOpen(true)
   }
 
@@ -111,7 +119,52 @@ export default function MonitoringAdminAccounts({
     if (userModalUser?.id != null) discardEdits(userModalUser.id)
     setUserModalOpen(false)
     setUserModalUser(null)
+    setLoginHistory([])
+    setLoginHistoryLoading(false)
+    setLoginHistoryErr('')
+    setLoginHistoryTotal(0)
+    setLoginHistoryPage(0)
   }
+
+  const loginAttemptMeta = row => {
+    if (row?.success === 1 || row?.success === true) return { label: 'Успешно', cls: 'success' }
+    if ((row?.reason || '') === 'LOGIN_RATE_LIMITED') return { label: 'Лимит', cls: 'warn' }
+    return { label: 'Ошибка', cls: 'danger' }
+  }
+
+  const loginAttemptReason = row => {
+    const reason = String(row?.reason || '')
+    if (reason === 'OK') return 'Вход выполнен'
+    if (reason === 'LOGIN_RATE_LIMITED') return 'Слишком много попыток'
+    if (reason === 'BAD_CREDENTIALS') return 'Неверный логин или пароль'
+    return reason || '—'
+  }
+
+  useEffect(() => {
+    if (!userModalOpen || !userModalUser?.id) return
+    let cancelled = false
+    setLoginHistory([])
+    setLoginHistoryErr('')
+    setLoginHistoryLoading(true)
+    const offset = loginHistoryPage * LOGIN_HISTORY_PAGE_SIZE
+    loadAdminUserLoginHistory(userModalUser.id, LOGIN_HISTORY_PAGE_SIZE, offset)
+      .then(payload => {
+        if (cancelled) return
+        setLoginHistory(payload?.items || [])
+        setLoginHistoryTotal(Number(payload?.total || 0))
+      })
+      .catch(e => {
+        if (cancelled) return
+        setLoginHistoryErr(String(e?.message || e || 'ERROR'))
+      })
+      .finally(() => {
+        if (cancelled) return
+        setLoginHistoryLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [userModalOpen, userModalUser?.id, loginHistoryPage])
 
   const openSaveModal = u => {
     if (!u) return
@@ -315,6 +368,65 @@ export default function MonitoringAdminAccounts({
                   <div className="field">
                     <label>Комментарий (последний сохранённый)</label>
                     <div className="status muted">{currentComment || '—'}</div>
+                  </div>
+
+                  <div className="panel-spacer" />
+                  <div className="field">
+                    <label>История входов</label>
+                    {loginHistoryLoading && <div className="muted">Загрузка...</div>}
+                    {!loginHistoryLoading && loginHistoryErr && <div className="status error">{loginHistoryErr}</div>}
+                    {!loginHistoryLoading && !loginHistoryErr && (
+                      <>
+                        <div className="login-history-scroll">
+                          <div className="table">
+                            <div className="table-head">
+                              <span>Время</span>
+                              <span>Статус</span>
+                              <span>IP</span>
+                              <span>Причина</span>
+                              <span>User-Agent</span>
+                            </div>
+                            {loginHistory.map(row => {
+                              const meta = loginAttemptMeta(row)
+                              return (
+                                <div className="table-row" key={`lh-${row.id}`}>
+                                  <span>{row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</span>
+                                  <span><span className={`tag ${meta.cls}`}>{meta.label}</span></span>
+                                  <span>{row.ip || '—'}</span>
+                                  <span>{loginAttemptReason(row)}</span>
+                                  <span title={row.user_agent || ''}>{row.user_agent || '—'}</span>
+                                </div>
+                              )
+                            })}
+                            {!loginHistory.length && <div className="muted">Записей пока нет.</div>}
+                          </div>
+                        </div>
+                        <div className="actions login-history-pager">
+                          <span className="muted">
+                            Стр. {loginHistoryPage + 1} из {Math.max(1, Math.ceil(loginHistoryTotal / LOGIN_HISTORY_PAGE_SIZE))}
+                          </span>
+                          <button
+                            className="ghost"
+                            onClick={() => setLoginHistoryPage(p => Math.max(0, p - 1))}
+                            disabled={loginHistoryPage <= 0 || loginHistoryLoading}
+                          >
+                            Назад
+                          </button>
+                          <button
+                            className="ghost"
+                            onClick={() => setLoginHistoryPage(p => p + 1)}
+                            disabled={(loginHistoryPage + 1) * LOGIN_HISTORY_PAGE_SIZE >= loginHistoryTotal || loginHistoryLoading}
+                          >
+                            Вперед
+                          </button>
+                        </div>
+                      </>
+                    )}
+                    {!loginHistoryLoading && !loginHistoryErr && loginHistoryTotal > 0 && (
+                      <div className="muted">
+                        Показано {loginHistory.length} из {loginHistoryTotal}
+                      </div>
+                    )}
                   </div>
 
                   <div className="actions">
