@@ -645,14 +645,27 @@ class Worker:
             "read_enabled": int(row["read_enabled"] or 0),
         }
 
-    async def _ai_generate(self, prompt: str, max_tokens: int = 300) -> str:
+    async def _ai_generate(self, prompt: str, max_tokens: int = 300, is_greeting: bool = False) -> str:
+        # Different parameters for greetings vs regular replies
+        if is_greeting:
+            # Higher temperature and penalties for more diverse greetings
+            temperature = 0.9
+            top_p = 0.95
+            frequency_penalty = 0.5  # Higher penalty to reduce phrase repetition
+            presence_penalty = 0.3   # Encourage more topic diversity
+        else:
+            temperature = 0.7
+            top_p = 0.9
+            frequency_penalty = 0.2
+            presence_penalty = 0.1
+            
         payload = {
             "prompt": prompt,
             "max_tokens": max_tokens,
-            "temperature": 0.7,  # Lower temperature for more consistent, less random responses
-            "top_p": 0.9,        # Slightly lower top_p for better focus
-            "frequency_penalty": 0.2,  # Reduce repetition of phrases
-            "presence_penalty": 0.1,   # Encourage topic diversity
+            "temperature": temperature,
+            "top_p": top_p,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
             # Prevent the model from continuing the transcript with role labels.
             "stop": [
                 "\nUser:",
@@ -697,7 +710,7 @@ class Worker:
             prompt = build_greeting_prompt(system_prompt, dialog.get("peer_username"), dialog.get("peer_display_name"))
 
             try:
-                text = await self._ai_generate(prompt, max_tokens=250)
+                text = await self._ai_generate(prompt, max_tokens=250, is_greeting=True)
                 if not text:
                     raise RuntimeError("EMPTY_GREETING")
                 msg = await self._send_message_resilient(account_id, int(dialog["peer_tg_user_id"]), text)
