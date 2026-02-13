@@ -188,6 +188,48 @@ class Worker:
         self._http = None
         self._auto_chat_sem: Dict[int, asyncio.Semaphore] = {}
 
+    @staticmethod
+    def _is_disconnected_exc(exc: Exception) -> bool:
+        if isinstance(exc, ConnectionError):
+            return True
+        msg = str(exc or "").lower()
+        return "disconnected" in msg or "not connected" in msg
+
+    async def _send_message_resilient(
+        self,
+        account_id: int,
+        peer_id: int,
+        text: str,
+        attempts: int = 2,
+    ):
+        last_exc: Optional[Exception] = None
+        for i in range(max(1, attempts)):
+            try:
+                live_client = await self.client_manager.get_client(account_id)
+                if not live_client.is_connected():
+                    await live_client.connect()
+                return await live_client.send_message(peer_id, text)
+            except AuthKeyUnregisteredError:
+                await self.client_manager.invalidate_session(account_id)
+                raise RuntimeError("SESSION_INVALID")
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_disconnected_exc(exc):
+                    raise
+                logger.warning(
+                    "autochat send reconnect account_id=%s attempt=%s err=%s: %s",
+                    account_id,
+                    i + 1,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self.client_manager._drop_cached_client(account_id)
+                if i + 1 < attempts:
+                    await asyncio.sleep(0.5 * (i + 1))
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("SEND_FAILED")
+
     async def run(self) -> None:
         init_db()
         logger.info("worker started")
@@ -654,7 +696,7 @@ class Worker:
                 text = await self._ai_generate(prompt, max_tokens=250)
                 if not text:
                     raise RuntimeError("EMPTY_GREETING")
-                msg = await client.send_message(dialog["peer_tg_user_id"], text)
+                msg = await self._send_message_resilient(account_id, int(dialog["peer_tg_user_id"]), text)
                 now = now_iso()
                 with db() as con:
                     con.execute(
@@ -844,7 +886,7 @@ class Worker:
                 if not text_out:
                     raise RuntimeError("EMPTY_REPLY")
 
-                msg2 = await client.send_message(peer_id, text_out)
+                msg2 = await self._send_message_resilient(account_id, peer_id, text_out)
                 now2 = now_iso()
 
                 with db() as con:
