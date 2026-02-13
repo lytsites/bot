@@ -2150,6 +2150,10 @@ def admin_errors(
                 SELECT d.id
                 FROM auto_chat_dialogs d
                 WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+                UNION ALL
+                SELECT af.auth_id
+                FROM auth_flows af
+                WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
             ) t
             """
         ).fetchone()["cnt"]
@@ -2226,6 +2230,26 @@ def admin_errors(
                 LEFT JOIN accounts a ON a.id = d.account_id
                 LEFT JOIN local_users u ON u.id = a.local_user_id
                 WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    af.auth_id AS source_id,
+                    af.expires_at AS created_at,
+                    'auth_flows' AS source,
+                    af.account_id AS account_id,
+                    af.local_user_id AS local_user_id,
+                    u.login AS local_login,
+                    CASE WHEN af.status='ERROR' THEN 'ERROR' ELSE 'WARN' END AS level,
+                    COALESCE(af.error_message, af.status, 'AUTH_FLOW_ERROR') AS message,
+                    (
+                        'auth_id=' || COALESCE(af.auth_id, '')
+                        || '; method=' || COALESCE(af.method, '')
+                        || '; status=' || COALESCE(af.status, '')
+                    ) AS context
+                FROM auth_flows af
+                LEFT JOIN local_users u ON u.id = af.local_user_id
+                WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
             ) x
             ORDER BY x.created_at DESC, x.source_id DESC
             LIMIT ? OFFSET ?
