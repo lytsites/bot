@@ -8,10 +8,10 @@ set "FRONT_DIR=%ROOT_DIR%\frontend"
 set "BACK_DIR=%ROOT_DIR%\backend"
 
 rem === Backend BATs ===
-set "AUTH_BAT=%BACK_DIR%\run_auth.bat"
-set "WORKER_BAT=%BACK_DIR%\run_worker.bat"
-set "MAIN_BAT=%BACK_DIR%\run_main.bat"
-set "AI_BAT=%BACK_DIR%\run_ai.bat"
+set "AUTH_BAT=%BACK_DIR%\run_auth_watchdog.bat"
+set "WORKER_BAT=%BACK_DIR%\run_worker_watchdog.bat"
+set "MAIN_BAT=%BACK_DIR%\run_main_watchdog.bat"
+set "AI_BAT=%BACK_DIR%\run_ai_watchdog.bat"
 
 rem === Window titles ===
 set "T1=GRID_FRONT_DEV"

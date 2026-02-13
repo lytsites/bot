@@ -8,4 +8,3 @@ set "PY=python"
 py -3.11 -V >nul 2>nul && set "PY=py -3.11"
 
 %PY% -m worker.main
-pause

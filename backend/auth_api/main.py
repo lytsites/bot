@@ -139,6 +139,8 @@ def qr_start(req: QrStartReq, request: Request):
         msg = str(e)
         if "TG_API_ID/TG_API_HASH" in msg:
             raise HTTPException(500, "TG_NOT_CONFIGURED")
+        if msg == "QR_START_TIMEOUT":
+            raise HTTPException(504, "QR_START_TIMEOUT")
         raise HTTPException(500, "QR_START_FAILED")
     except Exception as e:
         logger.exception("qr start failed")

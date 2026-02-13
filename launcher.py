@@ -12,9 +12,9 @@ BACK_DIR = __import__("os").path.join(ROOT_DIR, "backend")
 
 COMMANDS = [
     {"title": "Frontend (npm run dev)", "cmd": ["cmd", "/k", "npm run dev"], "cwd": FRONT_DIR},
-    {"title": "Auth service",           "cmd": ["cmd", "/k", "run_auth.bat"], "cwd": BACK_DIR},
-    {"title": "Worker",                "cmd": ["cmd", "/k", "run_worker.bat"], "cwd": BACK_DIR},
-    {"title": "Main API",              "cmd": ["cmd", "/k", "run_main.bat"], "cwd": BACK_DIR},
+    {"title": "Auth service",           "cmd": ["cmd", "/k", "run_auth_watchdog.bat"], "cwd": BACK_DIR},
+    {"title": "Worker",                "cmd": ["cmd", "/k", "run_worker_watchdog.bat"], "cwd": BACK_DIR},
+    {"title": "Main API",              "cmd": ["cmd", "/k", "run_main_watchdog.bat"], "cwd": BACK_DIR},
 ]
 
 # ==============================================
