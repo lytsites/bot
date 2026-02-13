@@ -3,7 +3,7 @@ import base64
 import concurrent.futures
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Optional
 import time
@@ -72,7 +72,11 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     try:
         if not ts:
             return None
-        return datetime.fromisoformat(str(ts))
+        dt = datetime.fromisoformat(str(ts))
+        # Normalize to naive UTC to avoid comparing aware/naive datetimes.
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     except Exception:
         return None
 
