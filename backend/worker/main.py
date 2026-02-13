@@ -355,7 +355,11 @@ class Worker:
                 groups_by_account = self._load_active_group_listeners()
                 if not groups_by_account:
                     self._stop_all_group_runs()
-                    await self.client_manager.disconnect_all()
+                    # Do not drop all clients while auto-chat may still be active.
+                    # Otherwise auto-chat sends can race with disconnects and fail intermittently.
+                    active_auto = self._load_accounts_with_active_auto_chat_dialogs()
+                    if not active_auto:
+                        await self.client_manager.disconnect_all()
                     await asyncio.sleep(3.0)
                     continue
                 active_ids = set(groups_by_account.keys())
