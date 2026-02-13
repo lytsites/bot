@@ -79,10 +79,27 @@ class ClientManager:
 
         state = self._clients.get(account_id)
         if state and state.session_string == session_string:
-            return state.client
+            try:
+                if not state.client.is_connected():
+                    await state.client.connect()
+                # Validate cached client before reuse; network drops can leave it disconnected.
+                await state.client.get_me()
+                return state.client
+            except AuthKeyUnregisteredError:
+                await self._drop_cached_client(account_id)
+                self._revoke_active_sessions(account_id)
+                raise RuntimeError("SESSION_INVALID")
+            except Exception as exc:
+                logger.warning(
+                    "cached client unusable account_id=%s err=%s: %s; recreating",
+                    account_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self._drop_cached_client(account_id)
 
         if state:
-            await state.client.disconnect()
+            await self._drop_cached_client(account_id)
 
         client = TelegramClient(StringSession(session_string), TG_API_ID, TG_API_HASH)
         await client.connect()
@@ -97,6 +114,20 @@ class ClientManager:
             raise RuntimeError("SESSION_INVALID")
         self._clients[account_id] = ClientState(session_string=session_string, client=client)
         return client
+
+    async def _drop_cached_client(self, account_id: int) -> None:
+        state = self._clients.pop(account_id, None)
+        if not state:
+            return
+        try:
+            await state.client.disconnect()
+        except Exception as exc:
+            logger.warning(
+                "drop cached client disconnect failed account_id=%s err=%s: %s",
+                account_id,
+                type(exc).__name__,
+                exc,
+            )
 
     async def disconnect_all(self) -> None:
         for state in self._clients.values():
