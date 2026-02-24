@@ -1,0 +1,24 @@
+[Unit]
+Description=TG Web Auth - Main API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgapp
+Group=tgapp
+WorkingDirectory=/opt/tg-web-auth/backend
+EnvironmentFile=/opt/tg-web-auth/.env
+ExecStart=/opt/tg-web-auth/backend/run_main_service.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/tg-web-auth/backend/var /opt/tg-web-auth/.env
+
+[Install]
+WantedBy=multi-user.target

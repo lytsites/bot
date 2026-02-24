@@ -1,0 +1,7 @@
+[Unit]
+Description=TG Web Auth - All backend services
+Wants=tg-auth.service tg-main.service tg-ai.service tg-worker.service
+After=tg-auth.service tg-main.service tg-ai.service tg-worker.service
+
+[Install]
+WantedBy=multi-user.target

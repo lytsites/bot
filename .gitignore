@@ -9,3 +9,4 @@ logs/
 *.db
 *.log.*
 .gguf
+frontend/dist/
