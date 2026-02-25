@@ -1458,7 +1458,9 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
   font-size: 1.05rem;
 }
 
-.support-panel button {
+.support-list-actions button,
+.support-form .actions button,
+.support-chat-input .actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1495,6 +1497,8 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
 }
 
 .support-ticket {
+  display: block;
+  width: 100%;
   text-align: left;
   border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
   background: var(--surface);
