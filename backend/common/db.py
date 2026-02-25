@@ -84,6 +84,9 @@ def apply_migrations(con: sqlite3.Connection) -> None:
                 elif version == "023":
                     # role already added
                     pass
+                elif version == "031":
+                    # support_notice_seen_at already added
+                    pass
                 else:
                     raise
             else:

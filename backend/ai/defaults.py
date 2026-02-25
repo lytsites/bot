@@ -12,6 +12,7 @@ _DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
 _DEFAULTS_JSON = _DEFAULTS_DIR / "new_local_user.json"
 _DEFAULTS_INSTRUCTION = _DEFAULTS_DIR / "new_local_user_instruction.txt"
 _DEFAULTS_GREETINGS = _DEFAULTS_DIR / "new_local_user_greeting_examples.txt"
+_SUPPORT_SITE_STRUCTURE = _DEFAULTS_DIR / "support_site_structure_instruction.txt"
 
 logger = get_logger("ai.defaults")
 
@@ -73,3 +74,7 @@ def load_new_local_user_defaults() -> NewLocalUserDefaults:
         typing_enabled=typing_enabled,
         read_enabled=read_enabled,
     )
+
+
+def load_support_site_structure_instruction() -> str:
+    return _read_text(_SUPPORT_SITE_STRUCTURE).strip()

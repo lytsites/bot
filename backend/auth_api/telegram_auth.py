@@ -24,6 +24,7 @@ from common.crypto import decrypt_text, encrypt_text
 from common.db import db
 from common.logging_setup import get_logger
 from common.phone import normalize_phone_digits, phone_variants
+from common.telegram_alerts import notify_error
 import qrcode
 
 
@@ -135,6 +136,13 @@ def _log_event(account_id: Optional[int], level: str, message: str) -> None:
         )
 
     _db_write_with_retry(_run)
+    if str(level or "").upper() == "ERROR":
+        notify_error(
+            source="events",
+            account_id=account_id,
+            message=message,
+            context="auth_api",
+        )
 
 
 def _active_flow_exists(con, phone: str) -> bool:
@@ -193,12 +201,29 @@ def _active_qr_flow_exists(con, local_user_id: int) -> bool:
 
 
 def _set_error(auth_id: str, message: str) -> None:
+    meta = {"account_id": None, "local_user_id": None}
+
     def _run(con):
+        row = con.execute(
+            "SELECT account_id, local_user_id FROM auth_flows WHERE auth_id=?",
+            (auth_id,),
+        ).fetchone()
+        if row:
+            meta["account_id"] = row["account_id"]
+            meta["local_user_id"] = row["local_user_id"]
         con.execute(
             "UPDATE auth_flows SET status=?, error_message=? WHERE auth_id=?",
             (STATUS_ERROR, message, auth_id),
         )
+
     _db_write_with_retry(_run)
+    notify_error(
+        source="auth_flows",
+        account_id=meta["account_id"],
+        local_user_id=meta["local_user_id"],
+        message=message,
+        context=f"auth_id={auth_id}",
+    )
 
 
 def _account_by_phone(con, phone: str):

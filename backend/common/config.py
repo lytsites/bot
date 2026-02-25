@@ -79,3 +79,8 @@ AUTH_FLOW_TTL_MINUTES = int(os.getenv("AUTH_FLOW_TTL_MINUTES", "10"))
 QR_TTL_SECONDS = int(os.getenv("QR_TTL_SECONDS", "180"))
 QR_REFRESH_AFTER_SECONDS = int(os.getenv("QR_REFRESH_AFTER_SECONDS", "120"))
 QR_START_TIMEOUT_SECONDS = int(os.getenv("QR_START_TIMEOUT_SECONDS", "20"))
+
+# Telegram bot alerts (errors -> bot)
+TG_ALERT_BOT_TOKEN = (os.getenv("TG_ALERT_BOT_TOKEN") or "").strip()
+_alert_chat_ids_raw = (os.getenv("TG_ALERT_BOT_CHAT_IDS") or "").strip()
+TG_ALERT_BOT_CHAT_IDS = [x.strip() for x in _alert_chat_ids_raw.split(",") if x.strip()]

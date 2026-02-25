@@ -33,7 +33,7 @@ export default function MonitoringTab({
     )
   }
   if (isSuperAdmin) {
-    items.push({ id: 'admin-errors', label: 'Ошибки' })
+    items.push({ id: 'admin-errors', label: 'Инциденты' })
   }
 
   return (

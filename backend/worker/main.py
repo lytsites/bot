@@ -12,11 +12,13 @@ from telethon import events
 from telethon.errors import FloodWaitError
 from telethon.errors.rpcerrorlist import AuthKeyUnregisteredError
 from telethon.sessions import StringSession
+from telethon.tl.types import PeerUser
 
-from common.config import TG_API_HASH, TG_API_ID
+from common.config import TG_ALERT_BOT_TOKEN, TG_API_HASH, TG_API_ID
 from common.crypto import decrypt_text
 from common.db import db, init_db
 from common.logging_setup import get_logger, setup_logging
+from common.telegram_alerts import notify_error, register_subscriber
 from ai.prompting import (
     build_auto_chat_system_prompt,
     build_greeting_prompt,
@@ -52,6 +54,7 @@ AUTO_CHAT_STATUS_ERROR = "ERROR"
 AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002")
 # Small human-like pause before showing "typing...".
 AUTO_CHAT_PRE_TYPING_DELAY_MS = int(os.getenv("AUTO_CHAT_PRE_TYPING_DELAY_MS", "1500"))
+TG_ALERT_BOT_POLL_TIMEOUT_SEC = int(os.getenv("TG_ALERT_BOT_POLL_TIMEOUT_SEC", "30"))
 
 
 def now_iso() -> str:
@@ -181,6 +184,7 @@ class Worker:
         self.client_manager = ClientManager()
         self._listener_task: Optional[asyncio.Task] = None
         self._auto_chat_task: Optional[asyncio.Task] = None
+        self._alert_bot_task: Optional[asyncio.Task] = None
         self._dialog_cache: Dict[int, Tuple[datetime, Dict[int, object]]] = {}
         # account_id -> id(client) to re-register handler if the client instance changes
         self._auto_chat_handler_client: Dict[int, int] = {}
@@ -200,6 +204,7 @@ class Worker:
         account_id: int,
         peer_id: int,
         text: str,
+        peer_username: Optional[str] = None,
         attempts: int = 2,
     ):
         last_exc: Optional[Exception] = None
@@ -208,7 +213,8 @@ class Worker:
                 live_client = await self.client_manager.get_client(account_id)
                 if not live_client.is_connected():
                     await live_client.connect()
-                return await live_client.send_message(peer_id, text)
+                input_peer = await self._resolve_input_peer(live_client, peer_id, peer_username)
+                return await live_client.send_message(input_peer, text)
             except AuthKeyUnregisteredError:
                 await self.client_manager.invalidate_session(account_id)
                 raise RuntimeError("SESSION_INVALID")
@@ -230,11 +236,61 @@ class Worker:
             raise last_exc
         raise RuntimeError("SEND_FAILED")
 
+    async def _resolve_input_peer(
+        self,
+        client: TelegramClient,
+        peer_id: int,
+        peer_username: Optional[str] = None,
+    ):
+        username = (peer_username or "").strip()
+        if username.startswith("@"):
+            username = username[1:]
+
+        try:
+            return await client.get_input_entity(peer_id)
+        except Exception:
+            pass
+
+        try:
+            return await client.get_input_entity(PeerUser(peer_id))
+        except Exception:
+            pass
+
+        if username:
+            try:
+                return await client.get_input_entity(username)
+            except Exception:
+                pass
+            try:
+                ent = await client.get_entity(username)
+                return await client.get_input_entity(ent)
+            except Exception:
+                pass
+
+        try:
+            dialogs = await client.get_dialogs(limit=300)
+            for d in dialogs:
+                if int(getattr(d, "id", 0) or 0) == int(peer_id):
+                    try:
+                        return await client.get_input_entity(d.entity)
+                    except Exception:
+                        break
+        except Exception:
+            pass
+
+        try:
+            ent = await client.get_entity(peer_id)
+            return await client.get_input_entity(ent)
+        except Exception as e:
+            raise RuntimeError(f"PEER_RESOLVE_FAILED:{peer_id}") from e
+
     async def run(self) -> None:
         init_db()
         logger.info("worker started")
         self._listener_task = asyncio.create_task(self._listen_groups_loop())
         self._auto_chat_task = asyncio.create_task(self._auto_chat_loop())
+        if TG_ALERT_BOT_TOKEN:
+            self._alert_bot_task = asyncio.create_task(self._alert_bot_loop())
         try:
             while True:
                 job = self._fetch_next_job()
@@ -247,9 +303,98 @@ class Worker:
                 self._listener_task.cancel()
             if self._auto_chat_task:
                 self._auto_chat_task.cancel()
+            if self._alert_bot_task:
+                self._alert_bot_task.cancel()
             await self.client_manager.disconnect_all()
             if self._http:
                 await self._http.aclose()
+
+    async def _ensure_http(self) -> None:
+        if self._http is None:
+            import httpx
+
+            timeout_s = float(os.getenv("AI_HTTP_TIMEOUT", "300"))
+            self._http = httpx.AsyncClient(timeout=timeout_s)
+
+    async def _alert_bot_loop(self) -> None:
+        await self._ensure_http()
+        assert self._http is not None
+
+        logger.info("alert bot polling enabled")
+        updates_url = f"https://api.telegram.org/bot{TG_ALERT_BOT_TOKEN}/getUpdates"
+        send_url = f"https://api.telegram.org/bot{TG_ALERT_BOT_TOKEN}/sendMessage"
+        webhook_url = f"https://api.telegram.org/bot{TG_ALERT_BOT_TOKEN}/deleteWebhook"
+        offset: Optional[int] = None
+
+        try:
+            await self._http.post(webhook_url, json={"drop_pending_updates": False})
+        except Exception as exc:
+            logger.warning("alert bot deleteWebhook failed err=%s: %s", type(exc).__name__, exc)
+
+        while True:
+            try:
+                params = {
+                    "timeout": TG_ALERT_BOT_POLL_TIMEOUT_SEC,
+                    "allowed_updates": '["message","edited_message"]',
+                }
+                if offset is not None:
+                    params["offset"] = offset
+
+                r = await self._http.get(updates_url, params=params)
+                r.raise_for_status()
+                data = r.json()
+                if not data.get("ok"):
+                    logger.warning("alert bot getUpdates not ok: %s", str(data)[:500])
+                    await asyncio.sleep(2.0)
+                    continue
+
+                updates = data.get("result") or []
+                for upd in updates:
+                    upd_id = int(upd.get("update_id", 0))
+                    if upd_id > 0:
+                        offset = upd_id + 1
+                    msg = upd.get("message") or upd.get("edited_message")
+                    if not isinstance(msg, dict):
+                        continue
+                    text = str(msg.get("text") or "").strip()
+                    if not text.startswith("/start"):
+                        continue
+
+                    chat = msg.get("chat") or {}
+                    chat_id = str(chat.get("id") or "").strip()
+                    if not chat_id:
+                        continue
+                    user = msg.get("from") or {}
+                    register_subscriber(
+                        chat_id=chat_id,
+                        username=(user.get("username") or None),
+                        first_name=(user.get("first_name") or None),
+                        last_name=(user.get("last_name") or None),
+                        source="telegram_start",
+                    )
+                    logger.info("alert bot subscriber upserted chat_id=%s", chat_id)
+
+                    try:
+                        await self._http.post(
+                            send_url,
+                            json={
+                                "chat_id": chat_id,
+                                "text": "Подписка на ошибки включена.",
+                                "disable_web_page_preview": True,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "alert bot start ack failed chat_id=%s err=%s: %s",
+                            chat_id,
+                            type(exc).__name__,
+                            exc,
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("alert bot loop failed err=%s: %s", type(exc).__name__, exc)
+                await asyncio.sleep(2.0)
 
     def _fetch_next_job(self) -> Optional[dict]:
         with db() as con:
@@ -303,7 +448,15 @@ class Worker:
             logger.exception("job.failed id=%s", job_id)
 
     def _finish_job(self, job_id: int, status: str, error: Optional[str]) -> None:
+        meta = {"account_id": None, "job_type": None}
         with db() as con:
+            row = con.execute(
+                "SELECT account_id, type FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if row:
+                meta["account_id"] = row["account_id"]
+                meta["job_type"] = row["type"]
             con.execute(
                 """
                 UPDATE jobs
@@ -311,6 +464,13 @@ class Worker:
                 WHERE id=?
                 """,
                 (status, error, now_iso(), job_id),
+            )
+        if status == STATUS_FAILED and error:
+            notify_error(
+                source="jobs",
+                account_id=meta["account_id"],
+                message=error,
+                context=f"job_id={job_id}; type={meta['job_type']}",
             )
 
     def _update_progress(self, job_id: int, progress: int) -> None:
@@ -434,11 +594,7 @@ class Worker:
         return grouped
 
     async def _auto_chat_loop(self) -> None:
-        import httpx
-
-        if self._http is None:
-            timeout_s = float(os.getenv("AI_HTTP_TIMEOUT", "300"))
-            self._http = httpx.AsyncClient(timeout=timeout_s)
+        await self._ensure_http()
 
         while True:
             try:
@@ -713,7 +869,12 @@ class Worker:
                 text = await self._ai_generate(prompt, max_tokens=250, is_greeting=True)
                 if not text:
                     raise RuntimeError("EMPTY_GREETING")
-                msg = await self._send_message_resilient(account_id, int(dialog["peer_tg_user_id"]), text)
+                msg = await self._send_message_resilient(
+                    account_id,
+                    int(dialog["peer_tg_user_id"]),
+                    text,
+                    peer_username=dialog.get("peer_username"),
+                )
                 now = now_iso()
                 with db() as con:
                     con.execute(
@@ -744,6 +905,12 @@ class Worker:
                         """,
                         (AUTO_CHAT_STATUS_ERROR, f"{type(e).__name__}: {e}", now, dialog_id),
                     )
+                notify_error(
+                    source="auto_chat_dialogs",
+                    account_id=account_id,
+                    message=f"{type(e).__name__}: {e}",
+                    context=f"dialog_id={dialog_id}; stage=send_greeting",
+                )
 
     async def _on_auto_chat_message(self, account_id: int, event) -> None:
         try:
@@ -814,7 +981,8 @@ class Worker:
                 try:
                     s = self._load_auto_chat_settings_for_account(account_id)
                     if int(s.get("read_enabled") or 0) == 1:
-                        await client.send_read_acknowledge(sender_id)
+                        ack_peer = getattr(event, "input_sender", None) or sender_id
+                        await client.send_read_acknowledge(ack_peer)
                 except Exception as exc:
                     logger.debug(
                         "autochat read_ack failed account_id=%s sender_id=%s err=%s: %s",
@@ -836,6 +1004,12 @@ class Worker:
                             "UPDATE auto_chat_dialogs SET status=?, last_error=?, updated_at=? WHERE id=?",
                             (AUTO_CHAT_STATUS_ERROR, f"{type(e).__name__}: {e}", now_iso(), dialog_id),
                         )
+                    notify_error(
+                        source="auto_chat_dialogs",
+                        account_id=account_id,
+                        message=f"{type(e).__name__}: {e}",
+                        context=f"dialog_id={dialog_id}; stage=on_message",
+                    )
             except Exception as exc:
                 logger.warning(
                     "autochat failed to persist dialog error account_id=%s err=%s: %s",
@@ -870,6 +1044,7 @@ class Worker:
                 prompt = build_reply_prompt(system_prompt, history)
 
                 peer_id = int(row["peer_tg_user_id"])
+                peer_input = await self._resolve_input_peer(client, peer_id, dialog.get("peer_username"))
 
                 # Best-effort "human" pacing: total time includes AI generation.
                 delay_ms = 0
@@ -886,7 +1061,7 @@ class Worker:
                 if int(s.get("typing_enabled") or 0) == 1:
                     if AUTO_CHAT_PRE_TYPING_DELAY_MS > 0:
                         await asyncio.sleep(AUTO_CHAT_PRE_TYPING_DELAY_MS / 1000.0)
-                    async with client.action(peer_id, "typing"):
+                    async with client.action(peer_input, "typing"):
                         t_req = monotonic()
                         text_out = await self._ai_generate(prompt, max_tokens=300)
                         latency_ms = int((monotonic() - t_req) * 1000)
@@ -903,7 +1078,12 @@ class Worker:
                 if not text_out:
                     raise RuntimeError("EMPTY_REPLY")
 
-                msg2 = await self._send_message_resilient(account_id, peer_id, text_out)
+                msg2 = await self._send_message_resilient(
+                    account_id,
+                    peer_id,
+                    text_out,
+                    peer_username=dialog.get("peer_username"),
+                )
                 now2 = now_iso()
 
                 with db() as con:
@@ -954,6 +1134,12 @@ class Worker:
                         """,
                         (AUTO_CHAT_STATUS_ERROR, f"{type(e).__name__}: {e}", now, dialog_id),
                     )
+                notify_error(
+                    source="auto_chat_dialogs",
+                    account_id=account_id,
+                    message=f"{type(e).__name__}: {e}",
+                    context=f"dialog_id={dialog_id}; stage=handle_pending",
+                )
 
     def _find_active_dialog(self, account_id: int, peer_tg_user_id: int) -> Optional[dict]:
         with db() as con:

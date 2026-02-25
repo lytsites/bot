@@ -1380,6 +1380,209 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
   max-width: none;
   text-align: center;
 }
+
+.support-notice-modal {
+  position: relative;
+  overflow: visible;
+}
+
+.support-onboard-arrow {
+  position: absolute;
+  left: 36px;
+  bottom: -128px;
+  width: 150px;
+  height: 120px;
+  border-left: 3px solid rgba(46, 82, 65, 0.85);
+  border-bottom: 3px solid rgba(46, 82, 65, 0.85);
+  border-bottom-left-radius: 90px;
+  pointer-events: none;
+}
+
+.support-onboard-arrow::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  bottom: -4px;
+  width: 0;
+  height: 0;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  border-right: 11px solid rgba(46, 82, 65, 0.85);
+}
+
+.support-fab {
+  position: fixed;
+  left: 18px;
+  bottom: 18px;
+  z-index: 1200;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-2);
+}
+
+.support-fab:hover {
+  transform: translateY(-1px);
+}
+
+.support-panel {
+  position: fixed;
+  left: 18px;
+  bottom: 70px;
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(72vh, 720px);
+  z-index: 1200;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+  padding: 12px;
+  overflow: hidden;
+}
+
+.support-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.support-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.support-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.support-head .row-actions {
+  align-items: center;
+}
+
+.icon-only {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.support-tickets {
+  display: grid;
+  gap: 8px;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.support-list-actions {
+  margin-bottom: 12px;
+}
+
+.support-ticket {
+  text-align: left;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.support-ticket-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.support-ticket-meta {
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.support-form textarea,
+.support-chat-input textarea {
+  resize: vertical;
+}
+
+.support-chat-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.support-chat-subject {
+  text-align: center;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--ink) 92%, var(--muted));
+  margin: 2px 0 6px;
+}
+
+.support-chat {
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 8px;
+  max-height: 42vh;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.support-msg {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.support-msg.user {
+  background: color-mix(in srgb, var(--success) 10%, var(--panel));
+}
+
+.support-msg.assistant {
+  background: color-mix(in srgb, var(--brand) 10%, var(--panel));
+}
+
+.support-msg.system {
+  background: color-mix(in srgb, #ffbf66 16%, var(--panel));
+}
+
+.support-msg-role {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.support-msg-time {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.support-chat-input {
+  display: grid;
+  gap: 8px;
+}
 .service-disabled-icon {
   font-size: 64px;
   line-height: 1;
@@ -1627,5 +1830,22 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
   }
   .badge {
     align-self: flex-start;
+  }
+
+  .support-panel {
+    left: 8px;
+    right: 8px;
+    bottom: 68px;
+    width: auto;
+    max-height: 70vh;
+  }
+
+  .support-fab {
+    left: 10px;
+    bottom: 10px;
+  }
+
+  .support-onboard-arrow {
+    display: none;
   }
 }

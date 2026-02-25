@@ -23,7 +23,7 @@ export default function MonitoringAdminErrors({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Ошибки</h2>
+        <h2>Инциденты</h2>
       </div>
 
       <div className="actions">
@@ -59,7 +59,7 @@ export default function MonitoringAdminErrors({
             <span>Источник</span>
             <span>Локальный</span>
             <span>Аккаунт</span>
-            <span>Ошибка</span>
+            <span>Описание</span>
           </div>
           {(adminErrors || []).map(row => (
             <div className="table-row" key={`${row.source}-${row.source_id}`}>
@@ -77,4 +77,3 @@ export default function MonitoringAdminErrors({
     </section>
   )
 }
-

@@ -12,6 +12,7 @@ import HomeTab from './tabs/HomeTab'
 import MonitoringTab from './tabs/MonitoringTab'
 import SettingsTab from './tabs/SettingsTab'
 import KeywordHighlight from './components/KeywordHighlight'
+import SupportWidget from './components/SupportWidget'
 import { ShieldX } from 'lucide-react'
 import './styles.css'
 
@@ -189,6 +190,9 @@ export default function App() {
   const [homeRequisites, setHomeRequisites] = useState([])
   const [homeRequisitesErr, setHomeRequisitesErr] = useState('')
   const [homeRequisitesLoading, setHomeRequisitesLoading] = useState(false)
+  const [supportNoticeOpen, setSupportNoticeOpen] = useState(false)
+  const [supportNoticeTitle, setSupportNoticeTitle] = useState('Новая линия поддержки')
+  const [supportNoticeText, setSupportNoticeText] = useState('')
 
   const listeningGroups = useMemo(
     () => groups.filter(item => item.is_listening),
@@ -697,6 +701,28 @@ export default function App() {
       })
     } catch (e) {
       setAiStatus({ ok: false, provider: '', deepseek_ok: false, deepseek_error: '', error: formatError(e) })
+    }
+  }
+
+  async function loadSupportNotice() {
+    try {
+      const r = await mainGet('/support/notice')
+      const show = Boolean(r?.show)
+      setSupportNoticeTitle(String(r?.title || 'Новая линия поддержки'))
+      setSupportNoticeText(String(r?.text || ''))
+      setSupportNoticeOpen(show)
+    } catch {
+      setSupportNoticeOpen(false)
+    }
+  }
+
+  async function closeSupportNotice() {
+    try {
+      await mainPost('/support/notice/ack', {})
+    } catch {
+      // ignore
+    } finally {
+      setSupportNoticeOpen(false)
     }
   }
 
@@ -1344,6 +1370,7 @@ export default function App() {
       loadAccounts().catch(e => setUiErr(formatError(e)))
       loadStats().catch(() => {})
       loadAiStatus().catch(() => {})
+      loadSupportNotice().catch(() => {})
       loadActiveSession().catch(() => {})
       if (canListening) {
         loadSettings().catch(() => {})
@@ -1470,9 +1497,9 @@ export default function App() {
   }, [isDarkTheme])
 
   useEffect(() => {
-    const hasModal = authModalOpen || showMatchesModal || systemBlockOpen || tgSessionExpiredOpen
+    const hasModal = authModalOpen || showMatchesModal || systemBlockOpen || tgSessionExpiredOpen || supportNoticeOpen
     document.body.classList.toggle('modal-open', hasModal)
-  }, [authModalOpen, showMatchesModal, systemBlockOpen, tgSessionExpiredOpen])
+  }, [authModalOpen, showMatchesModal, systemBlockOpen, tgSessionExpiredOpen, supportNoticeOpen])
 
   useEffect(() => {
     if (!systemBlockOpen) return
@@ -1854,10 +1881,12 @@ export default function App() {
       // If user is fully disabled, show the disabled screen only (no extra API calls).
       if (svc === false) return
       await loadAccounts()
+      await loadActiveSession()
       await loadStats()
       if (canListening) {
         await loadSettings()
       }
+      await loadSupportNotice()
     } catch (e) {
       setLoginErr(formatError(e))
     }
@@ -1936,6 +1965,8 @@ export default function App() {
     setHomeAutoChatMessages([])
     setHomeAutoChatMessagesErr('')
     setHomeAutoChatMessagesLoading(false)
+    setSupportNoticeOpen(false)
+    setSupportNoticeText('')
   }
 
   async function handleLogout() {
@@ -2458,6 +2489,26 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {supportNoticeOpen && (
+        <div className="modal-backdrop" onClick={closeSupportNotice}>
+          <div className="modal support-notice-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2>{supportNoticeTitle}</h2>
+              <button className="ghost" onClick={closeSupportNotice}>Закрыть</button>
+            </div>
+            <p className="muted">{supportNoticeText}</p>
+            <p className="muted">Если возникнет проблема, можно сразу создать обращение в поддержку.</p>
+            <div className="support-onboard-arrow" aria-hidden="true" />
+          </div>
+        </div>
+      )}
+
+      <SupportWidget
+        loggedIn={loggedIn}
+        pushToast={pushToast}
+        formatError={formatError}
+      />
     </div>
   )
 }

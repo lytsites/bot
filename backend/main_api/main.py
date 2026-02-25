@@ -3,6 +3,7 @@ import os
 import asyncio
 import sqlite3
 import re
+import json
 from typing import Optional
 
 import httpx
@@ -26,6 +27,8 @@ from common.users import (
     role_to_str,
 )
 from common.logging_setup import get_logger, request_id_middleware, setup_logging
+from common.telegram_alerts import notify_support_request
+from ai.defaults import load_support_site_structure_instruction
 from telethon import TelegramClient
 from telethon.errors import UsernameInvalidError, UsernameNotOccupiedError
 from telethon.errors.rpcerrorlist import AuthKeyUnregisteredError
@@ -93,6 +96,28 @@ AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002").rstrip("/")
 LOGIN_RATE_WINDOW_MINUTES = int(os.getenv("LOGIN_RATE_WINDOW_MINUTES", "15"))
 LOGIN_RATE_MAX_FAILS_PER_LOGIN = int(os.getenv("LOGIN_RATE_MAX_FAILS_PER_LOGIN", "12"))
 LOGIN_RATE_MAX_FAILS_PER_IP = int(os.getenv("LOGIN_RATE_MAX_FAILS_PER_IP", "40"))
+SUPPORT_ASSISTANT_SYSTEM_PROMPT = (
+    "Ты ассистент поддержки TG Web Auth. "
+    "Твоя задача: понять, можно ли дать точный и полезный ответ сразу в чате. "
+    "Если запрос про баг, падение, сбой, потерю данных, возмущение, доступы/инцидент или ты не уверен — эскалируй. "
+    "Если это навигация по интерфейсу, базовая инструкция, доступный функционал по роли — отвечай сам. "
+    "Верни строго JSON формата: "
+    "{\"decision\":\"self_answer\"|\"escalate\",\"assistant_reply\":\"...\",\"reason\":\"...\"}. "
+    "Если decision=escalate, assistant_reply может быть пустым."
+)
+
+SUPPORT_NOTICE_TITLE = "Новая линия поддержки"
+SUPPORT_NOTICE_TEXT = (
+    "Теперь вы можете отправлять обращения напрямую в поддержку через кнопку в левом нижнем углу. "
+    "Мы стараемся обрабатывать запросы максимально быстро."
+)
+
+SUPPORT_STATUS_OPEN = "OPEN"
+SUPPORT_STATUS_ESCALATED = "ESCALATED"
+SUPPORT_STATUS_RESOLVED = "RESOLVED"
+SUPPORT_ROUTE_PENDING = "PENDING"
+SUPPORT_ROUTE_SELF = "SELF_SERVICE"
+SUPPORT_ROUTE_ESCALATED = "ESCALATED"
 
 
 def _client_ip(request: Request) -> str:
@@ -1130,6 +1155,7 @@ def active_sessions(request: Request):
             JOIN accounts a ON a.id = s.account_id
             WHERE s.revoked_at IS NULL
               AND a.local_user_id=?
+              AND a.is_active=1
             ORDER BY s.updated_at DESC
             """,
             (user_id,),
@@ -1745,6 +1771,439 @@ def require_super_admin(request: Request) -> int:
     return user_id
 
 
+def _safe_parse_triage_json(text: str) -> dict:
+    raw = (text or "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+
+def _support_user_context(con: sqlite3.Connection, user_id: int) -> dict:
+    row = con.execute(
+        """
+        SELECT id, login, is_admin, role,
+               service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled
+        FROM local_users
+        WHERE id=?
+        """,
+        (user_id,),
+    ).fetchone()
+    if not row:
+        return {"id": user_id, "login": "", "role": "user"}
+    d = dict(row)
+    role_int = int(d.get("role") or (1 if d.get("is_admin") else 0))
+    return {
+        "id": int(d["id"]),
+        "login": str(d.get("login") or ""),
+        "role": role_to_str(role_int),
+        "service_enabled": bool(int(d.get("service_enabled") or 0)),
+        "feature_group_reading_enabled": bool(int(d.get("feature_group_reading_enabled") or 0)),
+        "feature_auto_dialogs_enabled": bool(int(d.get("feature_auto_dialogs_enabled") or 0)),
+    }
+
+
+def _support_triage(
+    *,
+    user_ctx: dict,
+    subject: str,
+    message: str,
+    history: Optional[list[dict]] = None,
+) -> dict:
+    site_structure = load_support_site_structure_instruction()
+    payload = {
+        "system": SUPPORT_ASSISTANT_SYSTEM_PROMPT,
+        "ui_site_structure_instruction": site_structure,
+        "user_context": user_ctx,
+        "ticket_subject": subject,
+        "ticket_message": message,
+        "history": history or [],
+        "constraints": {
+            "language": "ru",
+            "max_reply_chars": 1500,
+        },
+    }
+    prompt = (
+        "Проанализируй обращение и верни строго JSON.\n"
+        f"INPUT:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    try:
+        r = httpx.post(
+            f"{AI_API_URL}/ai/generate",
+            json={
+                "prompt": prompt,
+                "max_tokens": 450,
+                "temperature": 0.2,
+                "top_p": 0.9,
+            },
+            timeout=25.0,
+        )
+        if r.status_code >= 400:
+            return {"decision": "escalate", "assistant_reply": "", "reason": "AI_UNAVAILABLE"}
+        text = str((r.json() or {}).get("text") or "")
+        parsed = _safe_parse_triage_json(text)
+        decision = str(parsed.get("decision") or "").strip().lower()
+        if decision not in ("self_answer", "escalate"):
+            return {"decision": "escalate", "assistant_reply": "", "reason": "AI_BAD_DECISION"}
+        reply = str(parsed.get("assistant_reply") or "").strip()
+        reason = str(parsed.get("reason") or "").strip()[:500]
+        if decision == "self_answer" and not reply:
+            return {"decision": "escalate", "assistant_reply": "", "reason": "AI_EMPTY_REPLY"}
+        return {"decision": decision, "assistant_reply": reply[:1500], "reason": reason}
+    except Exception as e:
+        logger.info("support triage failed: %s: %s", type(e).__name__, e)
+        return {"decision": "escalate", "assistant_reply": "", "reason": "AI_EXCEPTION"}
+
+
+def _support_add_message(
+    con: sqlite3.Connection,
+    *,
+    ticket_id: int,
+    sender_type: str,
+    message: str,
+    meta: Optional[dict] = None,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO support_messages(ticket_id, sender_type, message, meta_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            ticket_id,
+            sender_type,
+            message,
+            (json.dumps(meta, ensure_ascii=False) if meta else None),
+            now_iso(),
+        ),
+    )
+
+
+def _support_escalate_ticket(
+    con: sqlite3.Connection,
+    *,
+    ticket_id: int,
+    user_id: int,
+    subject: str,
+    user_message: str,
+    reason: str,
+) -> dict:
+    now = now_iso()
+    login_row = con.execute("SELECT login FROM local_users WHERE id=?", (user_id,)).fetchone()
+    local_login = str((login_row["login"] if login_row else "") or "")
+    con.execute(
+        """
+        UPDATE support_tickets
+        SET status=?, route=?, escalated_at=?, updated_at=?, last_message_preview=?
+        WHERE id=? AND user_id=?
+        """,
+        (
+            SUPPORT_STATUS_ESCALATED,
+            SUPPORT_ROUTE_ESCALATED,
+            now,
+            now,
+            (user_message or "")[:240],
+            ticket_id,
+            user_id,
+        ),
+    )
+    _support_add_message(
+        con,
+        ticket_id=ticket_id,
+        sender_type="SYSTEM",
+        message="Обращение передано в поддержку.",
+        meta={"event": "ESCALATED", "reason": reason or "UNKNOWN"},
+    )
+    con.execute(
+        """
+        INSERT INTO events(account_id, level, message, created_at)
+        VALUES (NULL, 'WARN', ?, ?)
+        """,
+        (f"SUPPORT_ESCALATED: ticket_id={ticket_id}; user_id={user_id}; subject={subject}", now),
+    )
+    return {
+        "ticket_id": ticket_id,
+        "local_user_id": user_id,
+        "local_login": local_login,
+        "subject": subject,
+        "message": user_message,
+    }
+
+
+def _support_ticket_row(con: sqlite3.Connection, ticket_id: int, user_id: int):
+    return con.execute(
+        """
+        SELECT id, user_id, subject, status, route, last_message_preview, created_at, updated_at, resolved_at, escalated_at
+        FROM support_tickets
+        WHERE id=? AND user_id=?
+        """,
+        (ticket_id, user_id),
+    ).fetchone()
+
+
+class SupportTicketCreateReq(BaseModel):
+    subject: str = Field(min_length=3, max_length=200)
+    message: str = Field(min_length=3, max_length=6000)
+
+
+class SupportTicketChatReq(BaseModel):
+    message: str = Field(min_length=1, max_length=6000)
+
+
+@app.get("/support/notice")
+def support_notice(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        row = con.execute("SELECT support_notice_seen_at FROM local_users WHERE id=?", (user_id,)).fetchone()
+    seen = bool(row and row["support_notice_seen_at"])
+    return {
+        "show": not seen,
+        "title": SUPPORT_NOTICE_TITLE,
+        "text": SUPPORT_NOTICE_TEXT,
+    }
+
+
+@app.post("/support/notice/ack")
+def support_notice_ack(request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        con.execute(
+            "UPDATE local_users SET support_notice_seen_at=? WHERE id=?",
+            (now_iso(), user_id),
+        )
+    return {"ok": True}
+
+
+@app.get("/support/tickets")
+def support_list_tickets(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    user_id = require_auth(request)
+    with db() as con:
+        total = con.execute(
+            "SELECT COUNT(*) AS cnt FROM support_tickets WHERE user_id=?",
+            (user_id,),
+        ).fetchone()["cnt"]
+        rows = con.execute(
+            """
+            SELECT id, user_id, subject, status, route, last_message_preview, created_at, updated_at, resolved_at, escalated_at
+            FROM support_tickets
+            WHERE user_id=?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ).fetchall()
+    return {"items": [dict(r) for r in rows], "total": int(total or 0), "limit": limit, "offset": offset}
+
+
+@app.get("/support/tickets/{ticket_id}/messages")
+def support_ticket_messages(
+    ticket_id: int,
+    request: Request,
+    limit: int = Query(200, ge=1, le=1000),
+):
+    user_id = require_auth(request)
+    with db() as con:
+        owner = _support_ticket_row(con, ticket_id, user_id)
+        if not owner:
+            raise HTTPException(404, "SUPPORT_TICKET_NOT_FOUND")
+        rows = con.execute(
+            """
+            SELECT id, ticket_id, sender_type, message, meta_json, created_at
+            FROM support_messages
+            WHERE ticket_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (ticket_id, limit),
+        ).fetchall()
+    items = [dict(r) for r in rows][::-1]
+    return {"items": items}
+
+
+@app.post("/support/tickets")
+def support_create_ticket(req: SupportTicketCreateReq, request: Request):
+    user_id = require_auth(request)
+    subject = (req.subject or "").strip()
+    message = (req.message or "").strip()
+    if len(subject) < 3 or len(message) < 3:
+        raise HTTPException(400, "INVALID_SUPPORT_MESSAGE")
+
+    escalated_payload = None
+    with db() as con:
+        now = now_iso()
+        cur = con.execute(
+            """
+            INSERT INTO support_tickets(user_id, subject, status, route, last_message_preview, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                subject[:200],
+                SUPPORT_STATUS_OPEN,
+                SUPPORT_ROUTE_PENDING,
+                message[:240],
+                now,
+                now,
+            ),
+        )
+        ticket_id = int(cur.lastrowid)
+        _support_add_message(con, ticket_id=ticket_id, sender_type="USER", message=message)
+
+        user_ctx = _support_user_context(con, user_id)
+        triage = _support_triage(user_ctx=user_ctx, subject=subject, message=message)
+        if triage["decision"] == "self_answer":
+            reply = triage["assistant_reply"]
+            _support_add_message(
+                con,
+                ticket_id=ticket_id,
+                sender_type="ASSISTANT",
+                message=reply,
+                meta={"reason": triage.get("reason", "")},
+            )
+            con.execute(
+                """
+                UPDATE support_tickets
+                SET route=?, updated_at=?, last_message_preview=?
+                WHERE id=? AND user_id=?
+                """,
+                (SUPPORT_ROUTE_SELF, now_iso(), reply[:240], ticket_id, user_id),
+            )
+            ticket = _support_ticket_row(con, ticket_id, user_id)
+            return {"ticket": dict(ticket), "action": "self_answer", "assistant_message": reply}
+
+        escalated_payload = _support_escalate_ticket(
+            con,
+            ticket_id=ticket_id,
+            user_id=user_id,
+            subject=subject,
+            user_message=message,
+            reason=str(triage.get("reason") or ""),
+        )
+        ticket = _support_ticket_row(con, ticket_id, user_id)
+
+    if escalated_payload:
+        notify_support_request(**escalated_payload)
+    return {"ticket": dict(ticket), "action": "escalated"}
+
+
+@app.post("/support/tickets/{ticket_id}/chat")
+def support_ticket_chat(ticket_id: int, req: SupportTicketChatReq, request: Request):
+    user_id = require_auth(request)
+    message = (req.message or "").strip()
+    if not message:
+        raise HTTPException(400, "EMPTY_MESSAGE")
+    escalated_payload = None
+    with db() as con:
+        ticket = _support_ticket_row(con, ticket_id, user_id)
+        if not ticket:
+            raise HTTPException(404, "SUPPORT_TICKET_NOT_FOUND")
+        route = str(ticket["route"] or "")
+        if route == SUPPORT_ROUTE_ESCALATED:
+            raise HTTPException(409, "SUPPORT_ALREADY_ESCALATED")
+        if str(ticket["status"] or "") == SUPPORT_STATUS_RESOLVED:
+            raise HTTPException(409, "SUPPORT_TICKET_RESOLVED")
+
+        _support_add_message(con, ticket_id=ticket_id, sender_type="USER", message=message)
+        con.execute(
+            "UPDATE support_tickets SET updated_at=?, last_message_preview=? WHERE id=? AND user_id=?",
+            (now_iso(), message[:240], ticket_id, user_id),
+        )
+        hist_rows = con.execute(
+            """
+            SELECT sender_type, message
+            FROM support_messages
+            WHERE ticket_id=?
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (ticket_id,),
+        ).fetchall()
+        history = []
+        for r in reversed(hist_rows):
+            role = "user" if str(r["sender_type"]) == "USER" else "assistant"
+            history.append({"role": role, "message": str(r["message"] or "")[:1200]})
+
+        user_ctx = _support_user_context(con, user_id)
+        triage = _support_triage(
+            user_ctx=user_ctx,
+            subject=str(ticket["subject"] or ""),
+            message=message,
+            history=history,
+        )
+        if triage["decision"] == "self_answer":
+            reply = triage["assistant_reply"]
+            _support_add_message(
+                con,
+                ticket_id=ticket_id,
+                sender_type="ASSISTANT",
+                message=reply,
+                meta={"reason": triage.get("reason", "")},
+            )
+            con.execute(
+                """
+                UPDATE support_tickets
+                SET route=?, updated_at=?, last_message_preview=?
+                WHERE id=? AND user_id=?
+                """,
+                (SUPPORT_ROUTE_SELF, now_iso(), reply[:240], ticket_id, user_id),
+            )
+            ticket2 = _support_ticket_row(con, ticket_id, user_id)
+            return {"ticket": dict(ticket2), "action": "self_answer", "assistant_message": reply}
+
+        escalated_payload = _support_escalate_ticket(
+            con,
+            ticket_id=ticket_id,
+            user_id=user_id,
+            subject=str(ticket["subject"] or ""),
+            user_message=message,
+            reason=str(triage.get("reason") or ""),
+        )
+        ticket2 = _support_ticket_row(con, ticket_id, user_id)
+
+    if escalated_payload:
+        notify_support_request(**escalated_payload)
+    return {"ticket": dict(ticket2), "action": "escalated"}
+
+
+@app.post("/support/tickets/{ticket_id}/resolve")
+def support_ticket_resolve(ticket_id: int, request: Request):
+    user_id = require_auth(request)
+    with db() as con:
+        row = _support_ticket_row(con, ticket_id, user_id)
+        if not row:
+            raise HTTPException(404, "SUPPORT_TICKET_NOT_FOUND")
+        now = now_iso()
+        con.execute(
+            """
+            UPDATE support_tickets
+            SET status=?, resolved_at=?, updated_at=?
+            WHERE id=? AND user_id=?
+            """,
+            (SUPPORT_STATUS_RESOLVED, now, now, ticket_id, user_id),
+        )
+        _support_add_message(
+            con,
+            ticket_id=ticket_id,
+            sender_type="SYSTEM",
+            message="Пользователь пометил обращение как решенное.",
+            meta={"event": "RESOLVED_BY_USER"},
+        )
+        row2 = _support_ticket_row(con, ticket_id, user_id)
+    return {"ticket": dict(row2), "ok": True}
+
+
 class AdminUserCreateReq(BaseModel):
     login: str
     password: str
@@ -2154,6 +2613,10 @@ def admin_errors(
                 SELECT af.auth_id
                 FROM auth_flows af
                 WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
+                UNION ALL
+                SELECT st.id
+                FROM support_tickets st
+                WHERE st.route='ESCALATED' OR st.status='ESCALATED'
             ) t
             """
         ).fetchone()["cnt"]
@@ -2250,6 +2713,22 @@ def admin_errors(
                 FROM auth_flows af
                 LEFT JOIN local_users u ON u.id = af.local_user_id
                 WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    st.id AS source_id,
+                    st.updated_at AS created_at,
+                    'support_tickets' AS source,
+                    NULL AS account_id,
+                    st.user_id AS local_user_id,
+                    u.login AS local_login,
+                    'WARN' AS level,
+                    ('SUPPORT: ' || COALESCE(st.subject, '')) AS message,
+                    ('status=' || COALESCE(st.status, '') || '; route=' || COALESCE(st.route, '')) AS context
+                FROM support_tickets st
+                LEFT JOIN local_users u ON u.id = st.user_id
+                WHERE st.route='ESCALATED' OR st.status='ESCALATED'
             ) x
             ORDER BY x.created_at DESC, x.source_id DESC
             LIMIT ? OFFSET ?
@@ -2481,6 +2960,7 @@ def _get_active_account_session(local_user_id: int):
             JOIN accounts a ON a.id = s.account_id
             WHERE s.revoked_at IS NULL
               AND a.local_user_id=?
+              AND a.is_active=1
             ORDER BY s.updated_at DESC
             LIMIT 1
             """,

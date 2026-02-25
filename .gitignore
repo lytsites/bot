@@ -1,6 +1,9 @@
 *.pyc
 __pycache__/
 .venv/
+**/.venv/
+venv/
+**/venv/
 data.sqlite3
 **/data.sqlite3
 logs/
