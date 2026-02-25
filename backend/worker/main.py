@@ -18,7 +18,12 @@ from common.config import TG_ALERT_BOT_TOKEN, TG_API_HASH, TG_API_ID
 from common.crypto import decrypt_text
 from common.db import db, init_db
 from common.logging_setup import get_logger, setup_logging
-from common.telegram_alerts import notify_error, register_subscriber
+from common.telegram_alerts import (
+    flush_new_incident_alerts,
+    mark_current_incidents_as_sent,
+    notify_error,
+    register_subscriber,
+)
 from ai.prompting import (
     build_auto_chat_system_prompt,
     build_greeting_prompt,
@@ -55,6 +60,8 @@ AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002")
 # Small human-like pause before showing "typing...".
 AUTO_CHAT_PRE_TYPING_DELAY_MS = int(os.getenv("AUTO_CHAT_PRE_TYPING_DELAY_MS", "1500"))
 TG_ALERT_BOT_POLL_TIMEOUT_SEC = int(os.getenv("TG_ALERT_BOT_POLL_TIMEOUT_SEC", "30"))
+TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC", "5"))
+TG_ALERT_INCIDENTS_FLUSH_BATCH = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_BATCH", "100"))
 
 
 def now_iso() -> str:
@@ -185,6 +192,7 @@ class Worker:
         self._listener_task: Optional[asyncio.Task] = None
         self._auto_chat_task: Optional[asyncio.Task] = None
         self._alert_bot_task: Optional[asyncio.Task] = None
+        self._alert_incidents_task: Optional[asyncio.Task] = None
         self._dialog_cache: Dict[int, Tuple[datetime, Dict[int, object]]] = {}
         # account_id -> id(client) to re-register handler if the client instance changes
         self._auto_chat_handler_client: Dict[int, int] = {}
@@ -291,6 +299,7 @@ class Worker:
         self._auto_chat_task = asyncio.create_task(self._auto_chat_loop())
         if TG_ALERT_BOT_TOKEN:
             self._alert_bot_task = asyncio.create_task(self._alert_bot_loop())
+            self._alert_incidents_task = asyncio.create_task(self._alert_incidents_loop())
         try:
             while True:
                 job = self._fetch_next_job()
@@ -305,6 +314,8 @@ class Worker:
                 self._auto_chat_task.cancel()
             if self._alert_bot_task:
                 self._alert_bot_task.cancel()
+            if self._alert_incidents_task:
+                self._alert_incidents_task.cancel()
             await self.client_manager.disconnect_all()
             if self._http:
                 await self._http.aclose()
@@ -394,6 +405,25 @@ class Worker:
                 break
             except Exception as exc:
                 logger.warning("alert bot loop failed err=%s: %s", type(exc).__name__, exc)
+                await asyncio.sleep(2.0)
+
+    async def _alert_incidents_loop(self) -> None:
+        # Skip historical spam: mark all current incidents as already processed once.
+        try:
+            mark_current_incidents_as_sent(limit=100000)
+        except Exception as exc:
+            logger.warning("incident alerts baseline failed err=%s: %s", type(exc).__name__, exc)
+
+        while True:
+            try:
+                sent = flush_new_incident_alerts(limit=TG_ALERT_INCIDENTS_FLUSH_BATCH)
+                if sent > 0:
+                    logger.info("incident alerts sent=%s", sent)
+                await asyncio.sleep(max(1, TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC))
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("incident alerts loop failed err=%s: %s", type(exc).__name__, exc)
                 await asyncio.sleep(2.0)
 
     def _fetch_next_job(self) -> Optional[dict]:

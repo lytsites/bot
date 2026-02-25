@@ -115,6 +115,7 @@ export default function App() {
   const [adminErrorsTotal, setAdminErrorsTotal] = useState(0)
   const [adminErrorsErr, setAdminErrorsErr] = useState('')
   const [adminErrorsLoading, setAdminErrorsLoading] = useState(false)
+  const [resolvingIncidentKey, setResolvingIncidentKey] = useState('')
   const [adminMatches, setAdminMatches] = useState([])
   const [adminMatchesOffset, setAdminMatchesOffset] = useState(0)
   const [adminMatchesLimit, setAdminMatchesLimit] = useState(10)
@@ -435,6 +436,27 @@ export default function App() {
     }
   }
 
+  async function resolveAdminIncident(row) {
+    const source = String(row?.source || '').trim()
+    const sourceId = String(row?.source_id ?? '').trim()
+    if (!source || !sourceId) return
+    const key = `${source}:${sourceId}`
+    setResolvingIncidentKey(key)
+    try {
+      await mainPost(`/admin/errors/${encodeURIComponent(source)}/${encodeURIComponent(sourceId)}/resolve`, {})
+      await loadAdminErrors(adminErrorsOffset, adminErrorsLimit)
+      if (source === 'support_tickets') {
+        // keep support widget/status in sync if open in the same session
+        await loadSupportNotice().catch(() => {})
+      }
+      pushToast('success', 'Сохранено', 'Инцидент помечен как решенный')
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    } finally {
+      setResolvingIncidentKey('')
+    }
+  }
+
   async function loadAdminMatches(offset = adminMatchesOffset, limit = adminMatchesLimit) {
     const r = await mainGet(`/admin/group_matches?limit=${limit}&offset=${offset}`)
     setAdminMatches(r.items || [])
@@ -497,6 +519,56 @@ export default function App() {
       setAdminRequisites([])
     } finally {
       setAdminRequisitesLoading(false)
+    }
+  }
+
+  async function deleteMonitoringGroupMatch(matchId) {
+    if (!isSuperAdmin || !matchId) return
+    const ok = confirm('Удалить запись из истории чтения групп?')
+    if (!ok) return
+    try {
+      await mainDelete(`/admin/group_matches/${matchId}`)
+      await Promise.allSettled([
+        loadAdminMatches(adminMatchesOffset, adminMatchesLimit),
+        loadMonitoringListeningMatches(monitoringListeningMatchesOffset, monitoringListeningMatchesLimit),
+      ])
+      pushToast('success', 'Удалено', 'Запись удалена')
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function deleteMonitoringAutoDialog(dialogId) {
+    if (!isSuperAdmin || !dialogId) return
+    const ok = confirm('Удалить диалог из истории авто-общения?')
+    if (!ok) return
+    try {
+      await mainDelete(`/admin/auto_chat/dialogs/${dialogId}`)
+      await Promise.allSettled([loadAdminAutoChatDialogs(), loadHomeAutoChatDialogs()])
+      if (adminAutoChatHistoryActive?.dialog_id === dialogId) {
+        setAdminAutoChatHistoryActive(null)
+        setAdminAutoChatHistoryMessages([])
+      }
+      if (homeAutoChatHistoryActive?.dialog_id === dialogId) {
+        setHomeAutoChatHistoryActive(null)
+        setHomeAutoChatHistoryMessages([])
+      }
+      pushToast('success', 'Удалено', 'Диалог удален')
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    }
+  }
+
+  async function deleteMonitoringRequisite(requisiteId) {
+    if (!isSuperAdmin || !requisiteId) return
+    const ok = confirm('Удалить реквизит из истории?')
+    if (!ok) return
+    try {
+      await mainDelete(`/admin/requisites/${requisiteId}`)
+      await Promise.allSettled([loadAdminRequisites(), loadHomeRequisites()])
+      pushToast('success', 'Удалено', 'Реквизит удален')
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
     }
   }
 
@@ -2009,6 +2081,8 @@ export default function App() {
       }
       return loadMonitoringListeningMatches(monitoringListeningMatchesOffset, monitoringListeningMatchesLimit).catch(() => {})
     },
+    isSuperAdmin,
+    deleteMonitoringGroupMatch,
   }
 
   const adminAccountsProps = {
@@ -2047,6 +2121,8 @@ export default function App() {
     adminErrorsErr,
     setAdminErrorsOffset,
     reloadAdminErrors: () => loadAdminErrors(adminErrorsOffset, adminErrorsLimit).catch(() => {}),
+    resolveAdminIncident,
+    resolvingIncidentKey,
   }
 
   const settingsAccountsProps = {
@@ -2114,6 +2190,8 @@ export default function App() {
         await loadHomeAutoChatDialogs()
       }
     },
+    isSuperAdmin,
+    deleteMonitoringAutoDialog,
   }
 
   const monitoringRequisitesHistoryProps = {
@@ -2130,6 +2208,8 @@ export default function App() {
         await loadHomeRequisites()
       }
     },
+    isSuperAdmin,
+    deleteMonitoringRequisite,
   }
 
   const settingsAutoChatProps = {

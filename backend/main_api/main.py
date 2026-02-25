@@ -118,6 +118,7 @@ SUPPORT_STATUS_RESOLVED = "RESOLVED"
 SUPPORT_ROUTE_PENDING = "PENDING"
 SUPPORT_ROUTE_SELF = "SELF_SERVICE"
 SUPPORT_ROUTE_ESCALATED = "ESCALATED"
+INCIDENT_SOURCES = {"events", "jobs", "group_worker_runs", "auto_chat_dialogs", "auth_flows", "support_tickets"}
 
 
 def _client_ip(request: Request) -> str:
@@ -1949,6 +1950,17 @@ def _support_ticket_row(con: sqlite3.Connection, ticket_id: int, user_id: int):
     ).fetchone()
 
 
+def _support_ticket_row_admin(con: sqlite3.Connection, ticket_id: int):
+    return con.execute(
+        """
+        SELECT id, user_id, subject, status, route, last_message_preview, created_at, updated_at, resolved_at, escalated_at
+        FROM support_tickets
+        WHERE id=?
+        """,
+        (ticket_id,),
+    ).fetchone()
+
+
 class SupportTicketCreateReq(BaseModel):
     subject: str = Field(min_length=3, max_length=200)
     message: str = Field(min_length=3, max_length=6000)
@@ -2623,7 +2635,10 @@ def admin_errors(
 
         rows = con.execute(
             """
-            SELECT *
+            SELECT
+                x.*,
+                COALESCE(ir.is_resolved, 0) AS is_resolved,
+                ir.resolved_at AS incident_resolved_at
             FROM (
                 SELECT
                     e.id AS source_id,
@@ -2634,7 +2649,8 @@ def admin_errors(
                     u.login AS local_login,
                     UPPER(COALESCE(e.level, 'ERROR')) AS level,
                     e.message AS message,
-                    NULL AS context
+                    NULL AS context,
+                    NULL AS ticket_status
                 FROM events e
                 LEFT JOIN accounts a ON a.id = e.account_id
                 LEFT JOIN local_users u ON u.id = a.local_user_id
@@ -2651,7 +2667,8 @@ def admin_errors(
                     u.login AS local_login,
                     CASE WHEN j.status='FAILED' THEN 'ERROR' ELSE 'WARN' END AS level,
                     COALESCE(j.last_error, 'JOB_FAILED') AS message,
-                    ('type=' || COALESCE(j.type, '') || '; status=' || COALESCE(j.status, '')) AS context
+                    ('type=' || COALESCE(j.type, '') || '; status=' || COALESCE(j.status, '')) AS context,
+                    NULL AS ticket_status
                 FROM jobs j
                 LEFT JOIN accounts a ON a.id = j.account_id
                 LEFT JOIN local_users u ON u.id = a.local_user_id
@@ -2668,7 +2685,8 @@ def admin_errors(
                     u.login AS local_login,
                     'ERROR' AS level,
                     gwr.last_error AS message,
-                    ('status=' || COALESCE(gwr.status, '')) AS context
+                    ('status=' || COALESCE(gwr.status, '')) AS context,
+                    NULL AS ticket_status
                 FROM group_worker_runs gwr
                 LEFT JOIN accounts a ON a.id = gwr.account_id
                 LEFT JOIN local_users u ON u.id = a.local_user_id
@@ -2688,7 +2706,8 @@ def admin_errors(
                     (
                         'status=' || COALESCE(d.status, '')
                         || '; peer=' || COALESCE(d.peer_username, CAST(d.peer_tg_user_id AS TEXT), '')
-                    ) AS context
+                    ) AS context,
+                    NULL AS ticket_status
                 FROM auto_chat_dialogs d
                 LEFT JOIN accounts a ON a.id = d.account_id
                 LEFT JOIN local_users u ON u.id = a.local_user_id
@@ -2709,7 +2728,8 @@ def admin_errors(
                         'auth_id=' || COALESCE(af.auth_id, '')
                         || '; method=' || COALESCE(af.method, '')
                         || '; status=' || COALESCE(af.status, '')
-                    ) AS context
+                    ) AS context,
+                    NULL AS ticket_status
                 FROM auth_flows af
                 LEFT JOIN local_users u ON u.id = af.local_user_id
                 WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
@@ -2725,22 +2745,111 @@ def admin_errors(
                     u.login AS local_login,
                     'WARN' AS level,
                     ('SUPPORT: ' || COALESCE(st.subject, '')) AS message,
-                    ('status=' || COALESCE(st.status, '') || '; route=' || COALESCE(st.route, '')) AS context
+                    ('status=' || COALESCE(st.status, '') || '; route=' || COALESCE(st.route, '')) AS context,
+                    st.status AS ticket_status
                 FROM support_tickets st
                 LEFT JOIN local_users u ON u.id = st.user_id
                 WHERE st.route='ESCALATED' OR st.status='ESCALATED'
             ) x
+            LEFT JOIN incident_resolution ir
+              ON ir.source = x.source AND ir.source_id = CAST(x.source_id AS TEXT)
             ORDER BY x.created_at DESC, x.source_id DESC
             LIMIT ? OFFSET ?
             """,
             (limit, offset),
         ).fetchall()
+    items = []
+    for r in rows:
+        d = dict(r)
+        is_resolved = int(d.get("is_resolved") or 0)
+        if str(d.get("source") or "") == "support_tickets" and str(d.get("ticket_status") or "") == SUPPORT_STATUS_RESOLVED:
+            is_resolved = 1
+        d["is_resolved"] = bool(is_resolved)
+        d.pop("ticket_status", None)
+        items.append(d)
     return {
-        "items": [dict(r) for r in rows],
+        "items": items,
         "total": int(total or 0),
         "limit": int(limit),
         "offset": int(offset),
     }
+
+
+@app.post("/admin/errors/{source}/{source_id}/resolve")
+def admin_resolve_error(source: str, source_id: str, request: Request):
+    admin_user_id = require_super_admin(request)
+    src = str(source or "").strip().lower()
+    sid = str(source_id or "").strip()
+    if src not in INCIDENT_SOURCES or not sid:
+        raise HTTPException(400, "INVALID_INCIDENT_SOURCE")
+
+    now = now_iso()
+    with db() as con:
+        exists = False
+        if src == "events":
+            exists = con.execute(
+                "SELECT 1 FROM events WHERE id=? AND UPPER(COALESCE(level,''))='ERROR'",
+                (sid,),
+            ).fetchone() is not None
+        elif src == "jobs":
+            exists = con.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND (status='FAILED' OR COALESCE(last_error,'')<>'')",
+                (sid,),
+            ).fetchone() is not None
+        elif src == "group_worker_runs":
+            exists = con.execute(
+                "SELECT 1 FROM group_worker_runs WHERE id=? AND COALESCE(last_error,'')<>''",
+                (sid,),
+            ).fetchone() is not None
+        elif src == "auto_chat_dialogs":
+            exists = con.execute(
+                "SELECT 1 FROM auto_chat_dialogs WHERE id=? AND (status='ERROR' OR COALESCE(last_error,'')<>'')",
+                (sid,),
+            ).fetchone() is not None
+        elif src == "auth_flows":
+            exists = con.execute(
+                "SELECT 1 FROM auth_flows WHERE auth_id=? AND (status='ERROR' OR COALESCE(error_message,'')<>'')",
+                (sid,),
+            ).fetchone() is not None
+        elif src == "support_tickets":
+            try:
+                ticket_id = int(sid)
+            except Exception:
+                raise HTTPException(400, "INVALID_INCIDENT_SOURCE")
+            row = _support_ticket_row_admin(con, ticket_id)
+            exists = row is not None
+            if row and str(row["status"] or "") != SUPPORT_STATUS_RESOLVED:
+                con.execute(
+                    """
+                    UPDATE support_tickets
+                    SET status=?, resolved_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (SUPPORT_STATUS_RESOLVED, now, now, ticket_id),
+                )
+                _support_add_message(
+                    con,
+                    ticket_id=ticket_id,
+                    sender_type="SYSTEM",
+                    message="Супер-администратор пометил обращение как решенное.",
+                    meta={"event": "RESOLVED_BY_SUPERADMIN", "resolved_by_user_id": admin_user_id},
+                )
+        if not exists:
+            raise HTTPException(404, "INCIDENT_NOT_FOUND")
+
+        con.execute(
+            """
+            INSERT INTO incident_resolution(source, source_id, is_resolved, resolved_at, resolved_by_user_id, updated_at)
+            VALUES (?, ?, 1, ?, ?, ?)
+            ON CONFLICT(source, source_id) DO UPDATE SET
+                is_resolved=1,
+                resolved_at=excluded.resolved_at,
+                resolved_by_user_id=excluded.resolved_by_user_id,
+                updated_at=excluded.updated_at
+            """,
+            (src, sid, now, admin_user_id, now),
+        )
+    return {"ok": True, "source": src, "source_id": sid, "is_resolved": True}
 
 
 @app.get("/admin/group_matches")
@@ -2774,6 +2883,17 @@ def admin_group_matches(
             (*params, limit, offset),
         ).fetchall()
     return {"items": [dict(r) for r in rows]}
+
+
+@app.delete("/admin/group_matches/{match_id}")
+def admin_delete_group_match(match_id: int, request: Request):
+    require_super_admin(request)
+    with db() as con:
+        row = con.execute("SELECT id FROM group_matches WHERE id=?", (match_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "MATCH_NOT_FOUND")
+        con.execute("DELETE FROM group_matches WHERE id=?", (match_id,))
+    return {"ok": True}
 
 
 @app.get("/admin/auto_chat/dialogs")
@@ -2878,6 +2998,18 @@ def admin_list_auto_chat_messages(
     return {"dialog_id": dialog_id, "items": items}
 
 
+@app.delete("/admin/auto_chat/dialogs/{dialog_id}")
+def admin_delete_auto_chat_dialog(dialog_id: int, request: Request):
+    require_super_admin(request)
+    with db() as con:
+        row = con.execute("SELECT id FROM auto_chat_dialogs WHERE id=?", (dialog_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "DIALOG_NOT_FOUND")
+        con.execute("DELETE FROM auto_chat_messages WHERE dialog_id=?", (dialog_id,))
+        con.execute("DELETE FROM auto_chat_dialogs WHERE id=?", (dialog_id,))
+    return {"ok": True}
+
+
 @app.get("/requisites")
 def list_requisites(
     request: Request,
@@ -2949,6 +3081,17 @@ def admin_list_requisites(
             (*params, limit, offset),
         ).fetchall()
     return {"items": [dict(r) for r in rows]}
+
+
+@app.delete("/admin/requisites/{requisite_id}")
+def admin_delete_requisite(requisite_id: int, request: Request):
+    require_super_admin(request)
+    with db() as con:
+        row = con.execute("SELECT id FROM requisites WHERE id=?", (requisite_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "REQUISITE_NOT_FOUND")
+        con.execute("DELETE FROM requisites WHERE id=?", (requisite_id,))
+    return {"ok": True}
 
 
 def _get_active_account_session(local_user_id: int):

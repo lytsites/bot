@@ -1,4 +1,5 @@
 import React from 'react'
+import { Check } from 'lucide-react'
 
 export default function MonitoringAdminErrors({
   adminErrors,
@@ -9,6 +10,8 @@ export default function MonitoringAdminErrors({
   adminErrorsErr,
   setAdminErrorsOffset,
   reloadAdminErrors,
+  resolveAdminIncident,
+  resolvingIncidentKey,
 }) {
   const page = Math.floor((adminErrorsOffset || 0) / (adminErrorsLimit || 1)) + 1
   const pages = Math.max(1, Math.ceil((adminErrorsTotal || 0) / (adminErrorsLimit || 1)))
@@ -52,7 +55,7 @@ export default function MonitoringAdminErrors({
       {adminErrorsLoading && <div className="muted">Загрузка...</div>}
 
       {!adminErrorsLoading && !adminErrorsErr && (
-        <div className="table">
+        <div className="table incidents-table">
           <div className="table-head">
             <span>Когда</span>
             <span>Уровень</span>
@@ -60,6 +63,8 @@ export default function MonitoringAdminErrors({
             <span>Локальный</span>
             <span>Аккаунт</span>
             <span>Описание</span>
+            <span>Статус</span>
+            <span>Действие</span>
           </div>
           {(adminErrors || []).map(row => (
             <div className="table-row" key={`${row.source}-${row.source_id}`}>
@@ -69,6 +74,26 @@ export default function MonitoringAdminErrors({
               <span>{row.local_login || (row.local_user_id ? `#${row.local_user_id}` : '—')}</span>
               <span>{row.account_id ? `#${row.account_id}` : '—'}</span>
               <span title={row.message || ''}>{row.message || '—'}</span>
+              <span>
+                <span className={`tag ${row.is_resolved ? 'success' : 'warn'}`}>
+                  {row.is_resolved ? 'Решено' : 'Не решено'}
+                </span>
+              </span>
+              <span>
+                {!row.is_resolved ? (
+                  <button
+                    className="ghost icon-only"
+                    type="button"
+                    aria-label="Пометить как решенное"
+                    disabled={resolvingIncidentKey === `${row.source}:${row.source_id}`}
+                    onClick={() => resolveAdminIncident?.(row)}
+                  >
+                    <Check size={16} />
+                  </button>
+                ) : (
+                  '—'
+                )}
+              </span>
             </div>
           ))}
           {!(adminErrors || []).length && <div className="muted">Пока ничего нет.</div>}

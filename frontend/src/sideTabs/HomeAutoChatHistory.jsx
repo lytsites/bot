@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react'
+import { Trash2 } from 'lucide-react'
 import ChatThread from '../components/ChatThread'
 
 export default function HomeAutoChatHistory({
@@ -16,6 +17,8 @@ export default function HomeAutoChatHistory({
   homeAutoChatHistoryMessagesLoading,
   loadHomeAutoChatHistoryMessages,
   reload,
+  isSuperAdmin,
+  deleteMonitoringAutoDialog,
 }) {
   const items = useMemo(() => homeAutoChatDialogs || [], [homeAutoChatDialogs])
 
@@ -146,27 +149,38 @@ export default function HomeAutoChatHistory({
       {!homeAutoChatDialogsLoading && !homeAutoChatDialogsErr && items.length > 0 && (
         <div className="list">
           {items.map(d => (
-            <button
-              key={d.id}
-              className="row"
-              type="button"
-              onClick={() => {
-                setHomeAutoChatHistoryActive({
-                  dialog_id: d.id,
-                  peer_tg_user_id: d.peer_tg_user_id,
-                  peer_username: d.peer_username,
-                  peer_display_name: d.peer_display_name,
-                  status: d.status,
-                })
-              }}
-            >
-              <div>
+            <div key={d.id} className="row">
+              <button
+                className="row-main"
+                type="button"
+                onClick={() => {
+                  setHomeAutoChatHistoryActive({
+                    dialog_id: d.id,
+                    peer_tg_user_id: d.peer_tg_user_id,
+                    peer_username: d.peer_username,
+                    peer_display_name: d.peer_display_name,
+                    status: d.status,
+                  })
+                }}
+              >
+                <div>
                 <strong>{d.peer_username || d.peer_display_name || d.peer_tg_user_id}</strong>
                 {d.peer_display_name && <span>Имя: {d.peer_display_name}</span>}
                 <span>User ID: {d.peer_tg_user_id}</span>
                 <span className={`badge ${statusBadgeClass(d.status)}`}>{statusLabel(d.status)}</span>
-              </div>
-            </button>
+                </div>
+              </button>
+              {isSuperAdmin && (
+                <button
+                  className="ghost icon-only"
+                  type="button"
+                  aria-label="Удалить диалог из истории"
+                  onClick={() => deleteMonitoringAutoDialog?.(d.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}

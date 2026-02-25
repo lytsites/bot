@@ -1,4 +1,5 @@
 import React from 'react'
+import { Trash2 } from 'lucide-react'
 import KeywordHighlight from '../components/KeywordHighlight'
 
 export default function MonitoringListeningHistory({
@@ -11,6 +12,8 @@ export default function MonitoringListeningHistory({
   offset,
   limit,
   setOffset,
+  isSuperAdmin,
+  deleteMonitoringGroupMatch,
 }) {
   return (
     <section className="panel">
@@ -59,7 +62,19 @@ export default function MonitoringListeningHistory({
       <div className="log-list lg">
         {(matches || []).map(m => (
           <div className="log-item" key={`mm-${m.id}`}>
-            <span>{m.created_at ? new Date(m.created_at).toLocaleString() : '—'}</span>
+            <div className="log-item-top">
+              <span>{m.created_at ? new Date(m.created_at).toLocaleString() : '—'}</span>
+              {isSuperAdmin && (
+                <button
+                  className="ghost icon-only"
+                  type="button"
+                  aria-label="Удалить из истории"
+                  onClick={() => deleteMonitoringGroupMatch?.(m.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              )}
+            </div>
             <div>
               <KeywordHighlight text={m.message_text || '—'} keywords={m.matched_keywords || keywords} />
             </div>

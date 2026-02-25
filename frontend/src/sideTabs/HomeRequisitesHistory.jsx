@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react'
+import { Trash2 } from 'lucide-react'
 
 export default function HomeRequisitesHistory({
   showScopeToggle,
@@ -8,6 +9,8 @@ export default function HomeRequisitesHistory({
   homeRequisitesErr,
   homeRequisitesLoading,
   reload,
+  isSuperAdmin,
+  deleteMonitoringRequisite,
 }) {
   const items = useMemo(() => homeRequisites || [], [homeRequisites])
 
@@ -134,6 +137,16 @@ export default function HomeRequisitesHistory({
                   </span>
                 </div>
               </div>
+              {isSuperAdmin && (
+                <button
+                  className="ghost icon-only"
+                  type="button"
+                  aria-label="Удалить реквизит из истории"
+                  onClick={() => deleteMonitoringRequisite?.(r.id)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              )}
             </div>
           ))}
         </div>

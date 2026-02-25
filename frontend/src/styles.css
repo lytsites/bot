@@ -569,6 +569,11 @@ button:disabled {
   flex: 1;
   min-width: 0;
   cursor: pointer;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 0;
 }
 
 .checkbox {
@@ -606,7 +611,8 @@ button:disabled {
   border-color: var(--success);
   box-shadow: 0 10px 20px rgba(60, 200, 131, 0.18);
 }
-.row > div span {
+.row > div span,
+.row-main > div span {
   color: var(--muted);
   font-size: 12px;
   display: block;
@@ -614,7 +620,8 @@ button:disabled {
 }
 
 /* Badges inside rows should not stretch full width */
-.row > div span.badge {
+.row > div span.badge,
+.row-main > div span.badge {
   display: inline-flex;
   width: fit-content;
   padding: 3px 8px;
@@ -649,6 +656,12 @@ button:disabled {
   grid-template-columns: 0.6fr 1.2fr 1fr 1fr 1fr;
   gap: 10px;
   align-items: center;
+}
+
+.incidents-table .table-head,
+.incidents-table .table-row {
+  /* Keep all incident rows on one consistent 8-column grid. */
+  grid-template-columns: 1.05fr 0.6fr 0.85fr 0.85fr 0.7fr 2fr 0.8fr 0.55fr;
 }
 
 .table-head {
@@ -741,6 +754,13 @@ button:disabled {
   display: grid;
   gap: 6px;
   font-size: 12px;
+}
+
+.log-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .log-list.lg .log-item {
@@ -1768,6 +1788,10 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
   .table-head,
   .table-row {
     min-width: 760px;
+  }
+  .incidents-table .table-head,
+  .incidents-table .table-row {
+    min-width: 1220px;
   }
   .table-row > span,
   .table-head > span {

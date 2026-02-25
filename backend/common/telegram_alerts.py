@@ -120,13 +120,14 @@ def _format_message(
     return text
 
 
-def _send_plain_text(*, text: str) -> None:
+def _send_plain_text(*, text: str) -> int:
     if not _enabled():
-        return
+        return 0
     recipients = _load_recipients()
     if not recipients:
-        return
+        return 0
     url = f"https://api.telegram.org/bot{TG_ALERT_BOT_TOKEN}/sendMessage"
+    delivered = 0
     for chat_id, managed in recipients:
         try:
             with httpx.Client(timeout=5.0) as client:
@@ -142,8 +143,11 @@ def _send_plain_text(*, text: str) -> None:
                 logger.warning("telegram message failed chat_id=%s code=%s body=%s", chat_id, r.status_code, r.text[:500])
                 if managed and r.status_code in (400, 403):
                     deactivate_subscriber(chat_id)
+            else:
+                delivered += 1
         except Exception as exc:
             logger.warning("telegram message exception chat_id=%s err=%s: %s", chat_id, type(exc).__name__, exc)
+    return delivered
 
 
 def notify_error(
@@ -188,3 +192,191 @@ def notify_support_request(
     if len(text) > 3800:
         text = text[:3800] + "...(truncated)"
     _send_plain_text(text=text)
+
+
+def flush_new_incident_alerts(limit: int = 100) -> int:
+    """
+    Send incident records (the same sources used in Monitoring -> Incidents) to alert bot subscribers.
+    Sends each incident only once globally using alert_bot_incident_sent marker table.
+    """
+    if not _enabled():
+        return 0
+
+    recipients = _load_recipients()
+    if not recipients:
+        return 0
+
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT *
+            FROM (
+                SELECT
+                    'events' AS source,
+                    CAST(e.id AS TEXT) AS source_id,
+                    e.created_at AS created_at,
+                    e.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    e.message AS message,
+                    NULL AS context
+                FROM events e
+                LEFT JOIN accounts a ON a.id = e.account_id
+                WHERE UPPER(COALESCE(e.level, ''))='ERROR'
+
+                UNION ALL
+
+                SELECT
+                    'jobs' AS source,
+                    CAST(j.id AS TEXT) AS source_id,
+                    j.updated_at AS created_at,
+                    j.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    COALESCE(j.last_error, 'JOB_FAILED') AS message,
+                    ('type=' || COALESCE(j.type, '') || '; status=' || COALESCE(j.status, '')) AS context
+                FROM jobs j
+                LEFT JOIN accounts a ON a.id = j.account_id
+                WHERE j.status='FAILED' OR COALESCE(j.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    'group_worker_runs' AS source,
+                    CAST(gwr.id AS TEXT) AS source_id,
+                    COALESCE(gwr.stopped_at, gwr.started_at) AS created_at,
+                    gwr.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    gwr.last_error AS message,
+                    ('status=' || COALESCE(gwr.status, '')) AS context
+                FROM group_worker_runs gwr
+                LEFT JOIN accounts a ON a.id = gwr.account_id
+                WHERE COALESCE(gwr.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    'auto_chat_dialogs' AS source,
+                    CAST(d.id AS TEXT) AS source_id,
+                    d.updated_at AS created_at,
+                    d.account_id AS account_id,
+                    a.local_user_id AS local_user_id,
+                    COALESCE(d.last_error, 'AUTO_CHAT_ERROR') AS message,
+                    (
+                        'status=' || COALESCE(d.status, '')
+                        || '; peer=' || COALESCE(d.peer_username, CAST(d.peer_tg_user_id AS TEXT), '')
+                    ) AS context
+                FROM auto_chat_dialogs d
+                LEFT JOIN accounts a ON a.id = d.account_id
+                WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT
+                    'auth_flows' AS source,
+                    COALESCE(af.auth_id, '') AS source_id,
+                    af.expires_at AS created_at,
+                    af.account_id AS account_id,
+                    af.local_user_id AS local_user_id,
+                    COALESCE(af.error_message, af.status, 'AUTH_FLOW_ERROR') AS message,
+                    (
+                        'auth_id=' || COALESCE(af.auth_id, '')
+                        || '; method=' || COALESCE(af.method, '')
+                        || '; status=' || COALESCE(af.status, '')
+                    ) AS context
+                FROM auth_flows af
+                WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
+            ) x
+            LEFT JOIN alert_bot_incident_sent s
+              ON s.source = x.source AND s.source_id = x.source_id
+            WHERE s.source IS NULL
+            ORDER BY x.created_at ASC, x.source_id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+
+        sent = 0
+        for row in rows:
+            source = str(row["source"] or "")
+            source_id = str(row["source_id"] or "")
+            if not source or not source_id:
+                continue
+            text = _format_message(
+                source=source,
+                message=str(row["message"] or ""),
+                context=str(row["context"] or "") or None,
+                account_id=row["account_id"],
+                local_user_id=row["local_user_id"],
+            )
+            delivered = _send_plain_text(text=text)
+            if delivered <= 0:
+                # No successful delivery; do not burn the incident marker.
+                continue
+            con.execute(
+                """
+                INSERT OR IGNORE INTO alert_bot_incident_sent(source, source_id, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (source, source_id, _now_iso()),
+            )
+            sent += 1
+    return sent
+
+
+def mark_current_incidents_as_sent(limit: int = 100000) -> int:
+    """
+    Mark currently existing incidents as sent without delivering to bot.
+    Used once on worker start to avoid historical spam.
+    """
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT source, source_id
+            FROM (
+                SELECT 'events' AS source, CAST(e.id AS TEXT) AS source_id
+                FROM events e
+                WHERE UPPER(COALESCE(e.level, ''))='ERROR'
+
+                UNION ALL
+
+                SELECT 'jobs' AS source, CAST(j.id AS TEXT) AS source_id
+                FROM jobs j
+                WHERE j.status='FAILED' OR COALESCE(j.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT 'group_worker_runs' AS source, CAST(gwr.id AS TEXT) AS source_id
+                FROM group_worker_runs gwr
+                WHERE COALESCE(gwr.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT 'auto_chat_dialogs' AS source, CAST(d.id AS TEXT) AS source_id
+                FROM auto_chat_dialogs d
+                WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+
+                UNION ALL
+
+                SELECT 'auth_flows' AS source, COALESCE(af.auth_id, '') AS source_id
+                FROM auth_flows af
+                WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
+            ) x
+            LEFT JOIN alert_bot_incident_sent s
+              ON s.source = x.source AND s.source_id = x.source_id
+            WHERE s.source IS NULL
+              AND COALESCE(x.source_id, '') <> ''
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        marked = 0
+        ts = _now_iso()
+        for row in rows:
+            con.execute(
+                """
+                INSERT OR IGNORE INTO alert_bot_incident_sent(source, source_id, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (str(row["source"]), str(row["source_id"]), ts),
+            )
+            marked += 1
+    return marked
