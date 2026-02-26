@@ -62,10 +62,15 @@ AUTO_CHAT_PRE_TYPING_DELAY_MS = int(os.getenv("AUTO_CHAT_PRE_TYPING_DELAY_MS", "
 TG_ALERT_BOT_POLL_TIMEOUT_SEC = int(os.getenv("TG_ALERT_BOT_POLL_TIMEOUT_SEC", "30"))
 TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC", "5"))
 TG_ALERT_INCIDENTS_FLUSH_BATCH = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_BATCH", "100"))
+AUTO_CHAT_INCOMING_BUFFER_MS = max(0, int(os.getenv("AUTO_CHAT_INCOMING_BUFFER_MS", "3500")))
 
 
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
+
+
+def _buffer_ready_at_iso() -> str:
+    return (datetime.utcnow() + timedelta(milliseconds=AUTO_CHAT_INCOMING_BUFFER_MS)).isoformat()
 
 
 class JobCancelled(Exception):
@@ -722,12 +727,14 @@ class Worker:
         return [int(r["account_id"]) for r in rows]
 
     def _load_pending_dialogs(self, limit: int = 80) -> List[dict]:
+        now = now_iso()
         with db() as con:
             rows = con.execute(
                 """
                 SELECT id, account_id, peer_tg_user_id, peer_username, peer_display_name, status
                 FROM auto_chat_dialogs
                 WHERE pending_incoming=1
+                  AND (pending_buffer_until_at IS NULL OR pending_buffer_until_at<=?)
                   AND status IN (?, ?)
                   AND account_id IN (
                     SELECT a.id
@@ -740,7 +747,7 @@ class Worker:
                 ORDER BY updated_at ASC, id ASC
                 LIMIT ?
                 """,
-                (AUTO_CHAT_STATUS_WAIT_REPLY, AUTO_CHAT_STATUS_ACTIVE, limit),
+                (now, AUTO_CHAT_STATUS_WAIT_REPLY, AUTO_CHAT_STATUS_ACTIVE, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -831,6 +838,23 @@ class Worker:
             "read_enabled": int(row["read_enabled"] or 0),
         }
 
+    @staticmethod
+    def _shuffle_greeting_examples(raw: str) -> str:
+        """
+        Lightweight diversity boost:
+        shuffle user-provided greeting examples before each greeting generation.
+        """
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        lines = [ln.strip() for ln in text.splitlines()]
+        # Keep only meaningful lines from user examples.
+        items = [ln for ln in lines if ln and ln not in {"-", "—", "*"}]
+        if len(items) <= 1:
+            return text
+        random.shuffle(items)
+        return "\n".join(items)
+
     async def _ai_generate(self, prompt: str, max_tokens: int = 300, is_greeting: bool = False) -> str:
         # Different parameters for greetings vs regular replies
         if is_greeting:
@@ -892,7 +916,8 @@ class Worker:
                     return
 
             s = self._load_auto_chat_settings_for_account(account_id)
-            system_prompt = build_auto_chat_system_prompt(s["ai_instruction"], s["greeting_examples"])
+            shuffled_examples = self._shuffle_greeting_examples(s.get("greeting_examples") or "")
+            system_prompt = build_auto_chat_system_prompt(s["ai_instruction"], shuffled_examples)
             prompt = build_greeting_prompt(system_prompt, dialog.get("peer_username"), dialog.get("peer_display_name"))
 
             try:
@@ -917,7 +942,7 @@ class Worker:
                     con.execute(
                         """
                         UPDATE auto_chat_dialogs
-                        SET status=?, updated_at=?, last_error=NULL, last_outgoing_tg_message_id=?, pending_incoming=0
+                        SET status=?, updated_at=?, last_error=NULL, last_outgoing_tg_message_id=?, pending_incoming=0, pending_buffer_until_at=NULL
                         WHERE id=?
                         """,
                         (AUTO_CHAT_STATUS_WAIT_REPLY, now, getattr(msg, "id", None), dialog_id),
@@ -989,10 +1014,10 @@ class Worker:
                     con.execute(
                         """
                         UPDATE auto_chat_dialogs
-                        SET updated_at=?, last_incoming_tg_message_id=?, pending_incoming=1
+                        SET updated_at=?, last_incoming_tg_message_id=?, pending_incoming=1, pending_buffer_until_at=?
                         WHERE id=?
                         """,
-                        (now, tg_mid, dialog_id),
+                        (now, tg_mid, _buffer_ready_at_iso(), dialog_id),
                     )
                     # Сохраняем реквизиты из входящего сообщения
                     self._insert_requisites(
@@ -1057,7 +1082,11 @@ class Worker:
         async with lock:
             with db() as con:
                 row = con.execute(
-                    "SELECT status, pending_incoming, peer_tg_user_id FROM auto_chat_dialogs WHERE id=?",
+                    """
+                    SELECT status, pending_incoming, peer_tg_user_id, pending_buffer_until_at
+                    FROM auto_chat_dialogs
+                    WHERE id=?
+                    """,
                     (dialog_id,),
                 ).fetchone()
                 if not row:
@@ -1065,6 +1094,10 @@ class Worker:
                 if row["status"] not in (AUTO_CHAT_STATUS_WAIT_REPLY, AUTO_CHAT_STATUS_ACTIVE):
                     return
                 if int(row["pending_incoming"] or 0) != 1:
+                    return
+                ready_at = str(row["pending_buffer_until_at"] or "")
+                if ready_at and ready_at > now_iso():
+                    # Buffer window still open; wait for possible extra incoming messages.
                     return
 
             try:
@@ -1141,6 +1174,7 @@ class Worker:
                         UPDATE auto_chat_dialogs
                         SET status=?,
                             pending_incoming=0,
+                            pending_buffer_until_at=NULL,
                             updated_at=?,
                             last_error=NULL,
                             last_outgoing_tg_message_id=?,
@@ -1159,7 +1193,7 @@ class Worker:
                     con.execute(
                         """
                         UPDATE auto_chat_dialogs
-                        SET status=?, last_error=?, pending_incoming=0, updated_at=?
+                        SET status=?, last_error=?, pending_incoming=0, pending_buffer_until_at=NULL, updated_at=?
                         WHERE id=?
                         """,
                         (AUTO_CHAT_STATUS_ERROR, f"{type(e).__name__}: {e}", now, dialog_id),

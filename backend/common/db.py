@@ -87,6 +87,9 @@ def apply_migrations(con: sqlite3.Connection) -> None:
                 elif version == "031":
                     # support_notice_seen_at already added
                     pass
+                elif version == "034":
+                    # pending_buffer_until_at already added
+                    pass
                 else:
                     raise
             else:
