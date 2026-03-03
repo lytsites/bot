@@ -708,15 +708,43 @@ export default function App() {
     }
   }
 
-  async function cancelQr() {
-    if (!qrAuthId) return
+  function resetQrState() {
+    setPassword('')
+    setQrAuthId('')
+    setQrStatus('')
+    setQrDataUrl('')
+    setQrExpiresAt('')
+    setQrRefreshAfter('')
     setQrErr('')
+    setQrSubmitting(false)
+  }
+
+  async function cancelQr() {
+    setQrErr('')
+    if (!qrAuthId) {
+      resetQrState()
+      return true
+    }
     try {
-      const r = await authPost('/auth/cancel', { auth_id: qrAuthId })
-      setQrStatus(r.status)
+      await authPost('/auth/cancel', { auth_id: qrAuthId })
+      resetQrState()
+      return true
     } catch (e) {
       setQrErr(formatError(e))
+      return false
     }
+  }
+
+  async function closeAuthModal() {
+    let cancelled = true
+    if (qrAuthId && !qrStopped) {
+      cancelled = await cancelQr()
+    } else {
+      resetQrState()
+    }
+    if (!cancelled) return
+    resetQrState()
+    setAuthModalOpen(false)
   }
 
   async function sendPassword() {
@@ -1015,6 +1043,7 @@ export default function App() {
 
   async function handleTelegramSessionExpired() {
     setTgSessionExpiredText('Сессия Telegram истекла или была отозвана. Пожалуйста, авторизуйтесь заново.')
+    resetQrState()
     setTgSessionExpiredOpen(true)
     setAuthModalOpen(false)
     setAccounts([])
@@ -2013,6 +2042,7 @@ export default function App() {
     setHomeSideTab('listening')
     setMonitorSideTab('listening_history')
     setSettingsSideTab('main')
+    resetQrState()
     setAuthModalOpen(false)
     setTgSessionExpiredOpen(false)
     setTgSessionExpiredText('')
@@ -2475,11 +2505,11 @@ export default function App() {
       )}
 
       {authModalOpen && (
-        <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>
+        <div className="modal-backdrop" onClick={closeAuthModal}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
               <h2>Добавить аккаунт Telegram</h2>
-              <button className="ghost" onClick={() => setAuthModalOpen(false)}>Закрыть</button>
+              <button className="ghost" onClick={closeAuthModal}>Закрыть</button>
             </div>
 
             <div className="panel-head">
