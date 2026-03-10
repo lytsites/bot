@@ -274,7 +274,6 @@ export default function MonitoringAdminAccounts({
             <span>ID</span>
             <span>Логин</span>
             <span>Роль</span>
-            <span>Статус</span>
             <span>Последний онлайн</span>
             <span>Действия</span>
           </div>
@@ -302,10 +301,8 @@ export default function MonitoringAdminAccounts({
                   <span className={`tag ${accessTypeMeta(e.mode).cls}`}>{accessTypeMeta(e.mode).label}</span>
                 </span>
               </span>
-              <span><span className={`tag ${e.is_active ? 'success' : 'muted'}`}>{e.is_active ? 'Активен' : 'Отключён'}</span></span>
               <span>{formatDateTime(u.last_online_at)}</span>
               <span className="row-actions" onClick={ev => ev.stopPropagation()}>
-                <button className="ghost" onClick={() => openUserModal(u)}>Открыть</button>
                 <button className="danger" onClick={() => deleteAdminUser(u.id)} disabled={!canDeleteUser(u)}>Удалить</button>
               </span>
                   </>
