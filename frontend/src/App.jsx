@@ -206,6 +206,9 @@ export default function App() {
   const [systemRestartActive, setSystemRestartActive] = useState(false)
   const [systemRestartReason, setSystemRestartReason] = useState('')
   const [systemRestartUntil, setSystemRestartUntil] = useState('')
+  const [staticSystemRestartActive, setStaticSystemRestartActive] = useState(false)
+  const [staticSystemRestartReason, setStaticSystemRestartReason] = useState('')
+  const [staticSystemRestartUntil, setStaticSystemRestartUntil] = useState('')
 
   const listeningGroups = useMemo(
     () => groups.filter(item => item.is_listening),
@@ -213,10 +216,14 @@ export default function App() {
   )
 
   const systemRestartUntilDate = useMemo(() => toAlmatyDate(systemRestartUntil), [systemRestartUntil])
+  const staticSystemRestartUntilDate = useMemo(() => toAlmatyDate(staticSystemRestartUntil), [staticSystemRestartUntil])
   const restartGraceActive = Boolean(systemRestartUntilDate && systemRestartUntilDate.getTime() > Date.now())
+  const staticRestartGraceActive = Boolean(staticSystemRestartUntilDate && staticSystemRestartUntilDate.getTime() > Date.now())
   const localManualRestartPending = Boolean(pendingRestartServiceKey)
+  const visibleSystemRestartReason = systemRestartReason || staticSystemRestartReason || ''
+  const visibleSystemRestartUntil = systemRestartUntil || staticSystemRestartUntil || ''
   const aiUnavailable = loggedIn && isOnline && (aiStatus?.ok === false || aiStatus?.deepseek_ok === false)
-  const systemRestarting = loggedIn && (localManualRestartPending || systemRestartActive || restartGraceActive)
+  const systemRestarting = localManualRestartPending || systemRestartActive || staticSystemRestartActive || restartGraceActive || staticRestartGraceActive
   const systemBlockOpen = systemRestarting || !isOnline || aiUnavailable
   const systemBlockTitle = systemRestarting
     ? 'Сервер перезагружается'
@@ -885,6 +892,28 @@ export default function App() {
     }
   }
 
+  async function loadSystemStatusFile() {
+    try {
+      const res = await fetch(`/system-status.json?ts=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      })
+      if (!res.ok) throw new Error(`HTTP_${res.status}`)
+      const text = await res.text()
+      const data = JSON.parse(text)
+      setStaticSystemRestartActive(Boolean(data?.restarting))
+      setStaticSystemRestartReason(String(data?.reason || ''))
+      setStaticSystemRestartUntil(String(data?.until || ''))
+    } catch {
+      const keepRestartModal = Boolean(staticSystemRestartUntilDate && staticSystemRestartUntilDate.getTime() > Date.now())
+      setStaticSystemRestartActive(keepRestartModal)
+      if (!keepRestartModal) {
+        setStaticSystemRestartReason('')
+        setStaticSystemRestartUntil('')
+      }
+    }
+  }
+
   async function loadSupportNotice() {
     try {
       const r = await mainGet('/support/notice')
@@ -925,6 +954,33 @@ export default function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!isOnline) return
+
+    let cancelled = false
+    const tick = async () => {
+      try {
+        await loadSystemStatusFile()
+      } catch {
+        // ignore
+      }
+    }
+
+    tick().catch(() => {})
+    const t = setInterval(() => {
+      if (cancelled) return
+      tick().catch(() => {})
+    }, systemRestarting ? 2000 : 5000)
+    return () => {
+      cancelled = true
+      try {
+        clearInterval(t)
+      } catch {
+        // ignore
+      }
+    }
+  }, [isOnline, systemRestarting, staticSystemRestartUntilDate])
 
   const aiPollingRef = useRef({ inFlight: false, t: null })
   useEffect(() => {
@@ -2650,7 +2706,7 @@ export default function App() {
                 Сервис: {pendingRestartServiceLabel || pendingRestartServiceKey}
               </p>
             ) : null}
-            {systemRestarting && systemRestartUntil ? (
+            {systemRestarting && visibleSystemRestartUntil ? (
               <p className="muted sys-block-subtext">
                 Повторная проверка до: {formatDateTime(systemRestartUntil)}
               </p>

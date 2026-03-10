@@ -12,8 +12,9 @@ if str(ROOT) not in sys.path:
 from common.db import db, init_db
 from common.logging_setup import get_logger, setup_logging
 from common.service_restarts import RESTARTABLE_SERVICES_BY_KEY
+from common.system_status_file import clear_system_status_restarting, set_system_status_restarting
 from common.system_flags import clear_system_restarting, set_system_restarting
-from common.timezone import now_iso
+from common.timezone import now_iso, now_almaty, to_iso_local
 
 
 setup_logging()
@@ -78,8 +79,10 @@ def main() -> int:
             _mark_processing(con, request_id)
         try:
             logger.info("processing restart request id=%s service=%s unit=%s", request_id, service_key, system_unit)
+            restart_until = to_iso_local(now_almaty() + service.restart_timeout)
             with db() as con:
                 set_system_restarting(con, reason=f"manual_restart:{service_key}")
+            set_system_status_restarting(reason=f"manual_restart:{service_key}", until=restart_until)
             completed = subprocess.run(
                 ["systemctl", "restart", system_unit],
                 check=True,
@@ -99,6 +102,7 @@ def main() -> int:
             with db() as con:
                 _mark_failed(con, request_id, f"{type(exc).__name__}: {exc}")
         finally:
+            clear_system_status_restarting()
             with db() as con:
                 clear_system_restarting(con)
     logger.info("restart request processor finished processed=%s", processed)
