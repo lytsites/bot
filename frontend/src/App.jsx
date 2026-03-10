@@ -143,6 +143,8 @@ export default function App() {
   const [serviceRestartLoading, setServiceRestartLoading] = useState(false)
   const [serviceRestartReloading, setServiceRestartReloading] = useState(false)
   const [restartingServiceKey, setRestartingServiceKey] = useState('')
+  const [pendingRestartServiceKey, setPendingRestartServiceKey] = useState('')
+  const [pendingRestartServiceLabel, setPendingRestartServiceLabel] = useState('')
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
     try {
       return localStorage.getItem('theme') === 'dark'
@@ -212,8 +214,9 @@ export default function App() {
 
   const systemRestartUntilDate = useMemo(() => toAlmatyDate(systemRestartUntil), [systemRestartUntil])
   const restartGraceActive = Boolean(systemRestartUntilDate && systemRestartUntilDate.getTime() > Date.now())
+  const localManualRestartPending = Boolean(pendingRestartServiceKey)
   const aiUnavailable = loggedIn && isOnline && (aiStatus?.ok === false || aiStatus?.deepseek_ok === false)
-  const systemRestarting = loggedIn && (systemRestartActive || restartGraceActive)
+  const systemRestarting = loggedIn && (localManualRestartPending || systemRestartActive || restartGraceActive)
   const systemBlockOpen = systemRestarting || !isOnline || aiUnavailable
   const systemBlockTitle = systemRestarting
     ? 'Сервер перезагружается'
@@ -463,6 +466,8 @@ export default function App() {
     try {
       const r = await mainPost(`/admin/system/restarts/${encodeURIComponent(serviceKey)}`, {})
       const label = r?.item?.label || serviceKey
+      setPendingRestartServiceKey(serviceKey)
+      setPendingRestartServiceLabel(label)
       await loadServiceRestarts({ silent: true })
       pushToast('success', 'Поставлено в очередь', `Запрос на перезапуск "${label}" создан`)
     } catch (e) {
@@ -1842,6 +1847,46 @@ export default function App() {
 
   useEffect(() => {
     if (!loggedIn) return
+    if (!isAdmin) return
+    if (!pendingRestartServiceKey) return
+
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const r = await mainGet('/admin/system/restarts')
+        if (cancelled) return
+        const items = Array.isArray(r?.items) ? r.items : []
+        setServiceRestartItems(items)
+        setServiceRestartErr('')
+        const activeItem = items.find(item => item?.service_key === pendingRestartServiceKey)
+        const status = String(activeItem?.last_request?.status || '')
+        if (status === 'DONE') {
+          setPendingRestartServiceKey('')
+          setPendingRestartServiceLabel('')
+        } else if (status === 'FAILED') {
+          setPendingRestartServiceKey('')
+          setPendingRestartServiceLabel('')
+          pushToast('error', 'Рестарт не выполнен', String(activeItem?.last_request?.error_message || 'Не удалось перезапустить сервис'), 6000)
+        }
+      } catch {
+        // Main API may be unavailable briefly during restart.
+      }
+    }
+
+    tick().catch(() => {})
+    const t = setInterval(() => tick().catch(() => {}), 2000)
+    return () => {
+      cancelled = true
+      try {
+        clearInterval(t)
+      } catch {
+        // ignore
+      }
+    }
+  }, [loggedIn, isAdmin, pendingRestartServiceKey])
+
+  useEffect(() => {
+    if (!loggedIn) return
     if (activeTopTab !== 'home') return
     if (homeSideTab === 'auto') {
       loadHomeAutoChatUsernames().catch(() => {})
@@ -2158,6 +2203,8 @@ export default function App() {
     setSystemRestartActive(false)
     setSystemRestartReason('')
     setSystemRestartUntil('')
+    setPendingRestartServiceKey('')
+    setPendingRestartServiceLabel('')
     setServiceRestartItems([])
     setServiceRestartErr('')
     setServiceRestartLoading(false)
@@ -2598,6 +2645,11 @@ export default function App() {
             </div>
             <h2 className="sys-block-title">{systemBlockTitle}</h2>
             <p className="muted sys-block-text">{systemBlockDetail}</p>
+            {localManualRestartPending ? (
+              <p className="muted sys-block-subtext">
+                Сервис: {pendingRestartServiceLabel || pendingRestartServiceKey}
+              </p>
+            ) : null}
             {systemRestarting && systemRestartUntil ? (
               <p className="muted sys-block-subtext">
                 Повторная проверка до: {formatDateTime(systemRestartUntil)}
