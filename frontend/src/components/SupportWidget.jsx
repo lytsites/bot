@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react'
 import { LifeBuoy, MessageCirclePlus, Send, List } from 'lucide-react'
 import { mainGet, mainPost } from '../api'
+import { formatDateTime } from '../time'
 
 function fmtDate(value) {
   if (!value) return '—'
   try {
-    return new Date(value).toLocaleString()
+    return formatDateTime(value)
   } catch {
     return String(value)
   }
@@ -204,7 +205,7 @@ export default function SupportWidget({ loggedIn, pushToast, formatError }) {
                           <span className={`tag ${st.cls}`}>{st.label}</span>
                         </div>
                         <div className="support-ticket-meta">
-                          {fmtDate(t.updated_at || t.created_at)}
+                          {formatDateTime(t.updated_at || t.created_at)}
                         </div>
                       </button>
                     )
@@ -256,7 +257,7 @@ export default function SupportWidget({ loggedIn, pushToast, formatError }) {
                         {m.sender_type === 'USER' ? 'Вы' : (m.sender_type === 'ASSISTANT' ? 'Бот' : 'Система')}
                       </div>
                       <div>{renderMiniChatText(m.message)}</div>
-                      <div className="support-msg-time">{fmtDate(m.created_at)}</div>
+                      <div className="support-msg-time">{formatDateTime(m.created_at)}</div>
                     </div>
                   ))
                 )}

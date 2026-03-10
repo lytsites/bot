@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { formatDateTime } from '../time'
 
 export default function MonitoringAdminAccounts({
   isSuperAdmin,
@@ -274,6 +275,7 @@ export default function MonitoringAdminAccounts({
             <span>Логин</span>
             <span>Роль</span>
             <span>Статус</span>
+            <span>Последний онлайн</span>
             <span>Действия</span>
           </div>
           {filteredUsers.map(u => (
@@ -301,6 +303,7 @@ export default function MonitoringAdminAccounts({
                 </span>
               </span>
               <span><span className={`tag ${e.is_active ? 'success' : 'muted'}`}>{e.is_active ? 'Активен' : 'Отключён'}</span></span>
+              <span>{formatDateTime(u.last_online_at)}</span>
               <span className="row-actions" onClick={ev => ev.stopPropagation()}>
                 <button className="ghost" onClick={() => openUserModal(u)}>Открыть</button>
                 <button className="danger" onClick={() => deleteAdminUser(u.id)} disabled={!canDeleteUser(u)}>Удалить</button>
@@ -390,7 +393,7 @@ export default function MonitoringAdminAccounts({
                               const meta = loginAttemptMeta(row)
                               return (
                                 <div className="table-row" key={`lh-${row.id}`}>
-                                  <span>{row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</span>
+                                  <span>{formatDateTime(row.created_at)}</span>
                                   <span><span className={`tag ${meta.cls}`}>{meta.label}</span></span>
                                   <span>{row.ip || '—'}</span>
                                   <span>{loginAttemptReason(row)}</span>

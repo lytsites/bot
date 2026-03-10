@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react'
 import { Trash2 } from 'lucide-react'
+import { formatDateTime } from '../time'
 
 export default function HomeRequisitesHistory({
   showScopeToggle,
@@ -133,7 +134,7 @@ export default function HomeRequisitesHistory({
                     </span>
                   )}
                   <span>
-                    <strong>Найдено:</strong> {new Date(r.created_at).toLocaleString()}
+                    <strong>Найдено:</strong> {formatDateTime(r.created_at)}
                   </span>
                 </div>
               </div>

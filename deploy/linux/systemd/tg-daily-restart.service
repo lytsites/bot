@@ -1,0 +1,10 @@
+[Unit]
+Description=TG Web Auth - Daily backend restart
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/tg-web-auth/backend
+EnvironmentFile=/opt/tg-web-auth/.env
+ExecStart=/opt/tg-web-auth/.venv/bin/python /opt/tg-web-auth/backend/scripts/perform_daily_restart.py

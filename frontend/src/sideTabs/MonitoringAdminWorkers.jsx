@@ -1,4 +1,5 @@
 import React from 'react'
+import { formatDateTimeRange } from '../time'
 
 export default function MonitoringAdminWorkers({ adminWorkers, jobStatusMeta }) {
   return (
@@ -19,7 +20,7 @@ export default function MonitoringAdminWorkers({ adminWorkers, jobStatusMeta }) 
             <span>#{w.id}</span>
             <span>{w.account_id}</span>
             <span><span className={`tag ${jobStatusMeta(w.status).cls}`}>{jobStatusMeta(w.status).label}</span></span>
-            <span>{w.started_at}{w.stopped_at ? ` → ${w.stopped_at}` : ''}</span>
+            <span>{formatDateTimeRange(w.started_at, w.stopped_at)}</span>
             <span className="muted">{w.last_error || '—'}</span>
           </div>
         ))}

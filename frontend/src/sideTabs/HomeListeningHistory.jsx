@@ -1,5 +1,6 @@
 import React from 'react'
 import KeywordHighlight from '../components/KeywordHighlight'
+import { formatDateTime } from '../time'
 
 export default function HomeListeningHistory({
   matches,
@@ -32,7 +33,7 @@ export default function HomeListeningHistory({
       <div className="log-list lg">
         {(matches || []).map(m => (
           <div className="log-item" key={`hm-${m.id}`}>
-            <span>{m.created_at ? new Date(m.created_at).toLocaleString() : '—'}</span>
+            <span>{formatDateTime(m.created_at)}</span>
             <div>
               <KeywordHighlight text={m.message_text || '—'} keywords={m.matched_keywords || keywords} />
             </div>

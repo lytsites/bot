@@ -1,0 +1,10 @@
+[Unit]
+Description=TG Web Auth - Poll service restart requests
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+Unit=tg-control-requests.service
+
+[Install]
+WantedBy=timers.target

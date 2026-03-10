@@ -1,5 +1,6 @@
 import React from 'react'
 import { Check } from 'lucide-react'
+import { formatDateTime } from '../time'
 
 export default function MonitoringAdminErrors({
   adminErrors,
@@ -11,10 +12,13 @@ export default function MonitoringAdminErrors({
   setAdminErrorsOffset,
   reloadAdminErrors,
   resolveAdminIncident,
+  resolveAllAdminIncidents,
   resolvingIncidentKey,
+  resolvingAllIncidents,
 }) {
   const page = Math.floor((adminErrorsOffset || 0) / (adminErrorsLimit || 1)) + 1
   const pages = Math.max(1, Math.ceil((adminErrorsTotal || 0) / (adminErrorsLimit || 1)))
+  const unresolvedCount = (adminErrors || []).filter(row => !row.is_resolved).length
 
   const levelCls = level => {
     const v = String(level || '').toUpperCase()
@@ -47,6 +51,13 @@ export default function MonitoringAdminErrors({
         <button className="ghost" disabled={adminErrorsLoading} onClick={reloadAdminErrors}>
           Обновить
         </button>
+        <button
+          className="ghost"
+          disabled={adminErrorsLoading || resolvingAllIncidents || unresolvedCount <= 0}
+          onClick={() => resolveAllAdminIncidents?.()}
+        >
+          Решены все
+        </button>
         <div className="pill">Стр: {page} / {pages}</div>
         <div className="pill">Всего: {adminErrorsTotal || 0}</div>
       </div>
@@ -68,7 +79,7 @@ export default function MonitoringAdminErrors({
           </div>
           {(adminErrors || []).map(row => (
             <div className="table-row" key={`${row.source}-${row.source_id}`}>
-              <span>{row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</span>
+              <span>{formatDateTime(row.created_at)}</span>
               <span><span className={`tag ${levelCls(row.level)}`}>{row.level || '—'}</span></span>
               <span title={row.context || ''}>{row.source || '—'}</span>
               <span>{row.local_login || (row.local_user_id ? `#${row.local_user_id}` : '—')}</span>

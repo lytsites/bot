@@ -3,7 +3,7 @@ import base64
 import concurrent.futures
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
 import time
@@ -25,6 +25,7 @@ from common.db import db
 from common.logging_setup import get_logger
 from common.phone import normalize_phone_digits, phone_variants
 from common.telegram_alerts import notify_error
+from common.timezone import add_minutes_iso, add_seconds_iso, almaty_now_naive, now_iso, parse_iso_local
 import qrcode
 
 
@@ -48,38 +49,24 @@ QR_CONNECT_TIMEOUT_SECONDS = 12
 QR_LOGIN_CREATE_TIMEOUT_SECONDS = 12
 QR_REFRESH_TIMEOUT_SECONDS = 12
 
-
-
-def now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
-
 def expires_at_iso(minutes: int = AUTH_FLOW_TTL_MINUTES) -> str:
-    return (datetime.utcnow() + timedelta(minutes=minutes)).isoformat()
+    return add_minutes_iso(minutes)
 
 def qr_expires_at_iso(seconds: int = QR_TTL_SECONDS) -> str:
-    return (datetime.utcnow() + timedelta(seconds=seconds)).isoformat()
+    return add_seconds_iso(seconds)
 
 
 def qr_refresh_after_iso(seconds: int = QR_REFRESH_AFTER_SECONDS) -> str:
-    return (datetime.utcnow() + timedelta(seconds=seconds)).isoformat()
+    return add_seconds_iso(seconds)
 
 
 def _is_expired(expires_at: str) -> bool:
-    return datetime.utcnow() >= datetime.fromisoformat(expires_at)
+    dt = parse_iso_local(expires_at)
+    return dt is None or almaty_now_naive() >= dt
 
 
 def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
-    try:
-        if not ts:
-            return None
-        dt = datetime.fromisoformat(str(ts))
-        # Normalize to naive UTC to avoid comparing aware/naive datetimes.
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
-    except Exception:
-        return None
+    return parse_iso_local(ts)
 
 
 def _mark_expired(auth_id: str) -> None:
@@ -185,7 +172,7 @@ def _active_qr_flow_exists(con, local_user_id: int) -> bool:
             STATUS_WAIT_PASSWORD,
         ),
     ).fetchall()
-    now = datetime.utcnow()
+    now = almaty_now_naive()
     for row in rows:
         status = str(row["status"] or "")
         flow_expires = _parse_iso(row["expires_at"])
@@ -754,8 +741,8 @@ async def _qr_wait_for_login(auth_id: str) -> None:
         if qr_expires and (not flow_expires or qr_expires < flow_expires):
             target_expires = qr_expires
         if not target_expires:
-            target_expires = datetime.utcnow() + timedelta(seconds=QR_TTL_SECONDS)
-        timeout = max(1, int((target_expires - datetime.utcnow()).total_seconds()))
+            target_expires = almaty_now_naive() + timedelta(seconds=QR_TTL_SECONDS)
+        timeout = max(1, int((target_expires - almaty_now_naive()).total_seconds()))
         await state.qr_login.wait(timeout=timeout)
     except SessionPasswordNeededError:
         with db() as con:
@@ -862,7 +849,7 @@ async def _qr_create_flow(auth_id: str, local_user_id: int) -> dict:
         temp_session = client.session.save()
         enc_temp = encrypt_text(temp_session)
         enc_token = encrypt_text(qr_url)
-        qr_expires_at = qr_login.expires.isoformat()
+        qr_expires_at = parse_iso_local(qr_login.expires.isoformat()).isoformat()
 
         with db() as con:
             con.execute(
@@ -917,7 +904,7 @@ async def _qr_refresh_flow(auth_id: str) -> dict:
     qr_url = state.qr_login.url
     qr_png = _qr_make_png_data_url(qr_url)
     enc_token = encrypt_text(qr_url)
-    qr_expires_at = state.qr_login.expires.isoformat()
+    qr_expires_at = parse_iso_local(state.qr_login.expires.isoformat()).isoformat()
 
     with db() as con:
         con.execute(

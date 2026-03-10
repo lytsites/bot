@@ -1,15 +1,11 @@
 import hashlib
 import uuid
-from datetime import datetime, timedelta
 
 from common.db import db
+from common.timezone import add_minutes_iso, now_iso, parse_iso_local, almaty_now_naive
 
 
 SESSION_TTL_HOURS = 24
-
-
-def now_iso() -> str:
-    return datetime.utcnow().isoformat()
 
 
 def hash_password(raw: str) -> str:
@@ -18,7 +14,7 @@ def hash_password(raw: str) -> str:
 
 def create_session(user_id: int) -> dict:
     token = str(uuid.uuid4())
-    expires_at = (datetime.utcnow() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    expires_at = add_minutes_iso(SESSION_TTL_HOURS * 60)
     with db() as con:
         con.execute(
             """
@@ -44,7 +40,8 @@ def verify_token(token: str | None) -> int | None:
         ).fetchone()
     if not row:
         return None
-    if datetime.utcnow() >= datetime.fromisoformat(row["expires_at"]):
+    expires_at = parse_iso_local(row["expires_at"])
+    if not expires_at or almaty_now_naive() >= expires_at:
         return None
     return row["user_id"]
 

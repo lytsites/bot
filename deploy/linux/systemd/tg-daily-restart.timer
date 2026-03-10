@@ -1,0 +1,11 @@
+[Unit]
+Description=TG Web Auth - Daily backend restart at 05:00 Almaty
+
+[Timer]
+# Asia/Almaty is currently UTC+05:00 year-round, so 05:00 Almaty == 00:00 UTC.
+OnCalendar=*-*-* 00:00:00 UTC
+Persistent=true
+Unit=tg-daily-restart.service
+
+[Install]
+WantedBy=timers.target

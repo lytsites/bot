@@ -1,6 +1,7 @@
 import React from 'react'
 import { Trash2 } from 'lucide-react'
 import KeywordHighlight from '../components/KeywordHighlight'
+import { formatDateTime } from '../time'
 
 export default function MonitoringListeningHistory({
   showScopeToggle,
@@ -63,7 +64,7 @@ export default function MonitoringListeningHistory({
         {(matches || []).map(m => (
           <div className="log-item" key={`mm-${m.id}`}>
             <div className="log-item-top">
-              <span>{m.created_at ? new Date(m.created_at).toLocaleString() : '—'}</span>
+              <span>{formatDateTime(m.created_at)}</span>
               {isSuperAdmin && (
                 <button
                   className="ghost icon-only"

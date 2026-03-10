@@ -13,7 +13,8 @@ import MonitoringTab from './tabs/MonitoringTab'
 import SettingsTab from './tabs/SettingsTab'
 import KeywordHighlight from './components/KeywordHighlight'
 import SupportWidget from './components/SupportWidget'
-import { ShieldX } from 'lucide-react'
+import { formatDateTime, toAlmatyDate } from './time'
+import { RefreshCw, ShieldX } from 'lucide-react'
 import './styles.css'
 
 export default function App() {
@@ -116,6 +117,7 @@ export default function App() {
   const [adminErrorsErr, setAdminErrorsErr] = useState('')
   const [adminErrorsLoading, setAdminErrorsLoading] = useState(false)
   const [resolvingIncidentKey, setResolvingIncidentKey] = useState('')
+  const [resolvingAllIncidents, setResolvingAllIncidents] = useState(false)
   const [adminMatches, setAdminMatches] = useState([])
   const [adminMatchesOffset, setAdminMatchesOffset] = useState(0)
   const [adminMatchesLimit, setAdminMatchesLimit] = useState(10)
@@ -136,6 +138,11 @@ export default function App() {
   const [adminIsActive, setAdminIsActive] = useState(true)
   const [adminAccessMode, setAdminAccessMode] = useState('both') // both | no_groups | no_auto | disabled
   const [adminErr, setAdminErr] = useState('')
+  const [serviceRestartItems, setServiceRestartItems] = useState([])
+  const [serviceRestartErr, setServiceRestartErr] = useState('')
+  const [serviceRestartLoading, setServiceRestartLoading] = useState(false)
+  const [serviceRestartReloading, setServiceRestartReloading] = useState(false)
+  const [restartingServiceKey, setRestartingServiceKey] = useState('')
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
     try {
       return localStorage.getItem('theme') === 'dark'
@@ -194,18 +201,28 @@ export default function App() {
   const [supportNoticeOpen, setSupportNoticeOpen] = useState(false)
   const [supportNoticeTitle, setSupportNoticeTitle] = useState('Новая линия поддержки')
   const [supportNoticeText, setSupportNoticeText] = useState('')
+  const [systemRestartActive, setSystemRestartActive] = useState(false)
+  const [systemRestartReason, setSystemRestartReason] = useState('')
+  const [systemRestartUntil, setSystemRestartUntil] = useState('')
 
   const listeningGroups = useMemo(
     () => groups.filter(item => item.is_listening),
     [groups]
   )
 
+  const systemRestartUntilDate = useMemo(() => toAlmatyDate(systemRestartUntil), [systemRestartUntil])
+  const restartGraceActive = Boolean(systemRestartUntilDate && systemRestartUntilDate.getTime() > Date.now())
   const aiUnavailable = loggedIn && isOnline && (aiStatus?.ok === false || aiStatus?.deepseek_ok === false)
-  const systemBlockOpen = !isOnline || aiUnavailable
-  const systemBlockTitle = !isOnline ? 'Нет интернет-соединения' : 'ИИ недоступен'
-  const systemBlockDetail = !isOnline
-    ? 'Проверьте подключение к интернету. Окно закроется автоматически, когда соединение восстановится.'
-    : (aiStatus?.deepseek_error || aiStatus?.error || 'Сервис временно недоступен. Попробуйте позже.')
+  const systemRestarting = loggedIn && (systemRestartActive || restartGraceActive)
+  const systemBlockOpen = systemRestarting || !isOnline || aiUnavailable
+  const systemBlockTitle = systemRestarting
+    ? 'Сервер перезагружается'
+    : (!isOnline ? 'Нет интернет-соединения' : 'ИИ недоступен')
+  const systemBlockDetail = systemRestarting
+    ? 'Идёт технический перезапуск серверных процессов. Окно закроется автоматически после завершения.'
+    : (!isOnline
+      ? 'Проверьте подключение к интернету. Окно закроется автоматически, когда соединение восстановится.'
+      : (aiStatus?.deepseek_error || aiStatus?.error || 'Сервис временно недоступен. Попробуйте позже.'))
 
   const sortedGroups = useMemo(() => {
     return [...groups].sort((a, b) => {
@@ -420,6 +437,42 @@ export default function App() {
     setAdminWorkers(r.items || [])
   }
 
+  async function loadServiceRestarts({ silent = false } = {}) {
+    if (!silent) {
+      setServiceRestartErr('')
+      setServiceRestartLoading(true)
+    } else {
+      setServiceRestartReloading(true)
+    }
+    try {
+      const r = await mainGet('/admin/system/restarts')
+      setServiceRestartItems(r.items || [])
+      setServiceRestartErr('')
+    } catch (e) {
+      setServiceRestartErr(formatError(e))
+      if (!silent) setServiceRestartItems([])
+    } finally {
+      if (!silent) setServiceRestartLoading(false)
+      else setServiceRestartReloading(false)
+    }
+  }
+
+  async function requestServiceRestart(serviceKey) {
+    if (!serviceKey) return
+    setRestartingServiceKey(serviceKey)
+    try {
+      const r = await mainPost(`/admin/system/restarts/${encodeURIComponent(serviceKey)}`, {})
+      const label = r?.item?.label || serviceKey
+      await loadServiceRestarts({ silent: true })
+      pushToast('success', 'Поставлено в очередь', `Запрос на перезапуск "${label}" создан`)
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+      await loadServiceRestarts({ silent: true }).catch(() => {})
+    } finally {
+      setRestartingServiceKey('')
+    }
+  }
+
   async function loadAdminErrors(offset = adminErrorsOffset, limit = adminErrorsLimit) {
     setAdminErrorsErr('')
     setAdminErrorsLoading(true)
@@ -454,6 +507,20 @@ export default function App() {
       pushToast('error', 'Ошибка', formatError(e), 6000)
     } finally {
       setResolvingIncidentKey('')
+    }
+  }
+
+  async function resolveAllAdminIncidents() {
+    setResolvingAllIncidents(true)
+    try {
+      const r = await mainPost('/admin/errors/resolve_all', {})
+      await loadAdminErrors(adminErrorsOffset, adminErrorsLimit)
+      await loadSupportNotice().catch(() => {})
+      pushToast('success', 'Сохранено', `Отмечено как решенные: ${Number(r?.resolved || 0)}`)
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    } finally {
+      setResolvingAllIncidents(false)
     }
   }
 
@@ -799,7 +866,16 @@ export default function App() {
         deepseek_error: String(r?.deepseek_error || ''),
         error: r?.error ? String(r.error) : '',
       })
+      setSystemRestartActive(Boolean(r?.system_restarting))
+      setSystemRestartReason(String(r?.system_restart_reason || ''))
+      setSystemRestartUntil(String(r?.system_restart_until || ''))
     } catch (e) {
+      const keepRestartModal = Boolean(systemRestartUntilDate && systemRestartUntilDate.getTime() > Date.now())
+      setSystemRestartActive(keepRestartModal)
+      if (!keepRestartModal) {
+        setSystemRestartReason('')
+        setSystemRestartUntil('')
+      }
       setAiStatus({ ok: false, provider: '', deepseek_ok: false, deepseek_error: '', error: formatError(e) })
     }
   }
@@ -872,7 +948,7 @@ export default function App() {
       aiPollingRef.current.t = null
       aiPollingRef.current.inFlight = false
     }
-  }, [loggedIn, isOnline])
+  }, [loggedIn, isOnline, systemRestartUntilDate])
 
   async function loadSettings() {
     try {
@@ -1535,11 +1611,13 @@ export default function App() {
     // Settings
     if (settingsSideTab === 'listening' && !canListening) setSettingsSideTab('main')
     if (settingsSideTab === 'auto' && !canAuto) setSettingsSideTab('main')
+    if (settingsSideTab === 'service-control' && !isAdmin) setSettingsSideTab('main')
   }, [
     loggedIn,
     serviceEnabledChecked,
     featureGroupReadingEnabled,
     featureAutoDialogsEnabled,
+    isAdmin,
     homeSideTab,
     monitorSideTab,
     settingsSideTab,
@@ -1753,6 +1831,14 @@ export default function App() {
     loadAutoChatUsernames().catch(() => {})
     loadAutoChatSettings().catch(() => {})
   }, [loggedIn, activeTopTab, settingsSideTab])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    if (!isAdmin) return
+    if (activeTopTab !== 'settings') return
+    if (settingsSideTab !== 'service-control') return
+    loadServiceRestarts().catch(() => {})
+  }, [loggedIn, isAdmin, activeTopTab, settingsSideTab])
 
   useEffect(() => {
     if (!loggedIn) return
@@ -2069,6 +2155,14 @@ export default function App() {
     setHomeAutoChatMessagesLoading(false)
     setSupportNoticeOpen(false)
     setSupportNoticeText('')
+    setSystemRestartActive(false)
+    setSystemRestartReason('')
+    setSystemRestartUntil('')
+    setServiceRestartItems([])
+    setServiceRestartErr('')
+    setServiceRestartLoading(false)
+    setServiceRestartReloading(false)
+    setRestartingServiceKey('')
   }
 
   async function handleLogout() {
@@ -2152,7 +2246,9 @@ export default function App() {
     setAdminErrorsOffset,
     reloadAdminErrors: () => loadAdminErrors(adminErrorsOffset, adminErrorsLimit).catch(() => {}),
     resolveAdminIncident,
+    resolveAllAdminIncidents,
     resolvingIncidentKey,
+    resolvingAllIncidents,
   }
 
   const settingsAccountsProps = {
@@ -2270,6 +2366,16 @@ export default function App() {
     autoChatSettingsErr,
     autoChatSettingsLoading,
     saveAutoChatSettings,
+  }
+
+  const settingsServiceControlProps = {
+    items: serviceRestartItems,
+    loading: serviceRestartLoading,
+    err: serviceRestartErr,
+    reloading: serviceRestartReloading,
+    restartingKey: restartingServiceKey,
+    reload: () => loadServiceRestarts({ silent: true }).catch(() => {}),
+    requestRestart: requestServiceRestart,
   }
 
   const themeProps = {
@@ -2458,9 +2564,11 @@ export default function App() {
           accountsProps={settingsAccountsProps}
           listeningProps={settingsListeningProps}
           autoChatProps={settingsAutoChatProps}
+          serviceControlProps={settingsServiceControlProps}
           themeProps={themeProps}
           canGroupReading={featureGroupReadingEnabled}
           canAutoDialogs={featureAutoDialogsEnabled}
+          canServiceControl={isAdmin}
         />
       )}
 
@@ -2481,11 +2589,25 @@ export default function App() {
       {systemBlockOpen && (
         <div className="modal-backdrop sys-block-backdrop">
           <div className="modal sys-block-modal" onClick={e => e.stopPropagation()}>
-            <div className="sys-block-icon" aria-hidden="true">
-              <ShieldX size={68} strokeWidth={1.8} />
+            <div className={`sys-block-icon${systemRestarting ? ' spin' : ''}`} aria-hidden="true">
+              {systemRestarting ? (
+                <RefreshCw size={68} strokeWidth={1.8} />
+              ) : (
+                <ShieldX size={68} strokeWidth={1.8} />
+              )}
             </div>
             <h2 className="sys-block-title">{systemBlockTitle}</h2>
             <p className="muted sys-block-text">{systemBlockDetail}</p>
+            {systemRestarting && systemRestartUntil ? (
+              <p className="muted sys-block-subtext">
+                Повторная проверка до: {formatDateTime(systemRestartUntil)}
+              </p>
+            ) : null}
+            {systemRestarting && systemRestartReason ? (
+              <p className="muted sys-block-subtext">
+                Причина: {systemRestartReason}
+              </p>
+            ) : null}
           </div>
         </div>
       )}
@@ -2584,7 +2706,7 @@ export default function App() {
               <div className="log-list lg">
                 {matches.map(item => (
                   <div className="log-item" key={item.id}>
-                    <span>{new Date(item.created_at).toLocaleString()}</span>
+                    <span>{formatDateTime(item.created_at)}</span>
                     <div>
                       <KeywordHighlight text={item.message_text || '—'} keywords={item.matched_keywords || keywords} />
                     </div>

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Optional
 
 import httpx
@@ -8,6 +7,7 @@ import httpx
 from common.config import TG_ALERT_BOT_CHAT_IDS, TG_ALERT_BOT_TOKEN
 from common.db import db
 from common.logging_setup import get_logger
+from common.timezone import now_iso as _now_iso
 
 
 logger = get_logger("telegram.alerts")
@@ -15,10 +15,6 @@ logger = get_logger("telegram.alerts")
 
 def _enabled() -> bool:
     return bool(TG_ALERT_BOT_TOKEN)
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def register_subscriber(

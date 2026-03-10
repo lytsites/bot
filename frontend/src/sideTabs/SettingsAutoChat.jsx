@@ -1,4 +1,5 @@
 import React from 'react'
+import { formatDateTime } from '../time'
 
 export default function SettingsAutoChat({
   autoChatInput,
@@ -41,15 +42,7 @@ export default function SettingsAutoChat({
 
   const formatDate = value => {
     if (!value) return '—'
-    const dt = new Date(value)
-    if (Number.isNaN(dt.getTime())) return value
-    return dt.toLocaleString('ru-RU', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+    return formatDateTime(value)
   }
 
   const statusLabel = item => {

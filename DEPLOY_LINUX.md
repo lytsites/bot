@@ -78,11 +78,13 @@ certbot --nginx -d <frontend-host> -d api.<base-domain> -d auth.<base-domain>
 ## 6. Проверка состояния
 
 ```bash
-systemctl status tg-auth tg-main tg-ai tg-worker --no-pager
+systemctl status tg-auth tg-main tg-ai tg-worker tg-control-requests.timer tg-daily-restart.timer --no-pager
 journalctl -u tg-main -n 100 --no-pager
 journalctl -u tg-auth -n 100 --no-pager
 journalctl -u tg-ai -n 100 --no-pager
 journalctl -u tg-worker -n 100 --no-pager
+journalctl -u tg-control-requests.service -n 100 --no-pager
+journalctl -u tg-daily-restart.service -n 100 --no-pager
 ```
 
 ## 7. Ручные команды запуска (без systemd)

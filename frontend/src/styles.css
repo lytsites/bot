@@ -1375,10 +1375,29 @@ body.theme-dark .login-history-scroll::-webkit-scrollbar-thumb {
   opacity: 0.92;
 }
 
+.sys-block-icon.spin svg {
+  animation: sys-block-spin 1.4s linear infinite;
+}
+
 .sys-block-title {
   margin: 0 0 8px;
   font-size: 22px;
   line-height: 1.15;
+}
+
+.sys-block-subtext {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+@keyframes sys-block-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .sys-block-text {

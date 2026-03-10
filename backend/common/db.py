@@ -1,13 +1,9 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 from common.config import DB_PATH
-
-
-def now_iso() -> str:
-    return datetime.utcnow().isoformat()
+from common.timezone import now_iso
 
 def _ensure_db_dir() -> None:
     try:

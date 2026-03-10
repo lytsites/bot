@@ -24,6 +24,7 @@ from common.telegram_alerts import (
     notify_error,
     register_subscriber,
 )
+from common.timezone import almaty_now_naive, now_iso, parse_iso_local
 from ai.prompting import (
     build_auto_chat_system_prompt,
     build_greeting_prompt,
@@ -59,18 +60,14 @@ AUTO_CHAT_STATUS_ERROR = "ERROR"
 AI_API_URL = os.getenv("AI_API_URL", "http://127.0.0.1:8002")
 # Small human-like pause before showing "typing...".
 AUTO_CHAT_PRE_TYPING_DELAY_MS = int(os.getenv("AUTO_CHAT_PRE_TYPING_DELAY_MS", "1500"))
+AUTO_CHAT_CLIENT_TIMEOUT_SEC = max(5.0, float(os.getenv("AUTO_CHAT_CLIENT_TIMEOUT_SEC", "20")))
+AUTO_CHAT_STARTING_TTL_SEC = max(30, int(os.getenv("AUTO_CHAT_STARTING_TTL_SEC", "180")))
 TG_ALERT_BOT_POLL_TIMEOUT_SEC = int(os.getenv("TG_ALERT_BOT_POLL_TIMEOUT_SEC", "30"))
 TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_INTERVAL_SEC", "5"))
 TG_ALERT_INCIDENTS_FLUSH_BATCH = int(os.getenv("TG_ALERT_INCIDENTS_FLUSH_BATCH", "100"))
 AUTO_CHAT_INCOMING_BUFFER_MS = max(0, int(os.getenv("AUTO_CHAT_INCOMING_BUFFER_MS", "3500")))
-
-
-def now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
-
 def _buffer_ready_at_iso() -> str:
-    return (datetime.utcnow() + timedelta(milliseconds=AUTO_CHAT_INCOMING_BUFFER_MS)).isoformat()
+    return (almaty_now_naive() + timedelta(milliseconds=AUTO_CHAT_INCOMING_BUFFER_MS)).isoformat()
 
 
 class JobCancelled(Exception):
@@ -633,11 +630,12 @@ class Worker:
 
         while True:
             try:
+                self._cleanup_stale_starting_dialogs()
                 # Ensure event handlers are attached even after a worker restart,
                 # so dialogs in WAIT_REPLY/ACTIVE continue to receive messages.
                 for account_id in self._load_accounts_with_active_auto_chat_dialogs():
                     try:
-                        client = await self.client_manager.get_client(account_id)
+                        client = await self._get_auto_chat_client(account_id, stage="handler")
                     except RuntimeError as e:
                         logger.info("autochat skip handler account_id=%s reason=%s", account_id, e)
                         continue
@@ -662,14 +660,17 @@ class Worker:
 
                 for account_id, dialogs in by_account.items():
                     try:
-                        client = await self.client_manager.get_client(account_id)
+                        client = await self._get_auto_chat_client(account_id, stage="greetings")
                     except RuntimeError as e:
+                        self._fail_starting_dialogs(account_id, dialogs, str(e))
                         logger.info("autochat skip greetings account_id=%s reason=%s", account_id, e)
                         continue
                     except AuthKeyUnregisteredError:
                         await self.client_manager.invalidate_session(account_id)
+                        self._fail_starting_dialogs(account_id, dialogs, "SESSION_INVALID")
                         continue
                     except Exception:
+                        self._fail_starting_dialogs(account_id, dialogs, "GET_CLIENT_FAILED")
                         logger.exception("autochat get_client for greetings failed account_id=%s", account_id)
                         continue
 
@@ -771,7 +772,7 @@ class Worker:
 
         for account_id, dialogs in by_account.items():
             try:
-                client = await self.client_manager.get_client(account_id)
+                client = await self._get_auto_chat_client(account_id, stage="pending")
             except RuntimeError as e:
                 logger.info("autochat skip pending account_id=%s reason=%s", account_id, e)
                 continue
@@ -793,6 +794,93 @@ class Worker:
             tasks = [asyncio.create_task(_run_one(d)) for d in dialogs]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _get_auto_chat_client(self, account_id: int, stage: str) -> TelegramClient:
+        try:
+            return await asyncio.wait_for(
+                self.client_manager.get_client(account_id),
+                timeout=AUTO_CHAT_CLIENT_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "autochat get_client timeout account_id=%s stage=%s timeout=%ss",
+                account_id,
+                stage,
+                AUTO_CHAT_CLIENT_TIMEOUT_SEC,
+            )
+            raise RuntimeError(f"CLIENT_TIMEOUT:{stage}") from exc
+
+    def _cleanup_stale_starting_dialogs(self) -> int:
+        cutoff = (almaty_now_naive() - timedelta(seconds=AUTO_CHAT_STARTING_TTL_SEC)).isoformat()
+        now = now_iso()
+        with db() as con:
+            rows = con.execute(
+                """
+                SELECT id, account_id
+                FROM auto_chat_dialogs
+                WHERE status=?
+                  AND updated_at<=?
+                ORDER BY updated_at ASC, id ASC
+                """,
+                (AUTO_CHAT_STATUS_STARTING, cutoff),
+            ).fetchall()
+            if not rows:
+                return 0
+            dialog_ids = [int(r["id"]) for r in rows]
+            con.executemany(
+                """
+                UPDATE auto_chat_dialogs
+                SET status=?,
+                    pending_incoming=0,
+                    pending_buffer_until_at=NULL,
+                    stopped_at=COALESCE(stopped_at, ?),
+                    updated_at=?,
+                    last_error=NULL
+                WHERE id=?
+                  AND status=?
+                """,
+                [
+                    (AUTO_CHAT_STATUS_STOPPED, now, now, dialog_id, AUTO_CHAT_STATUS_STARTING)
+                    for dialog_id in dialog_ids
+                ],
+            )
+        logger.warning(
+            "autochat cleaned stale STARTING dialogs count=%s ttl=%ss dialog_ids=%s",
+            len(dialog_ids),
+            AUTO_CHAT_STARTING_TTL_SEC,
+            ",".join(str(x) for x in dialog_ids[:20]),
+        )
+        return len(dialog_ids)
+
+    def _fail_starting_dialogs(self, account_id: int, dialogs: List[dict], reason: str) -> None:
+        dialog_ids = [int(d["id"]) for d in dialogs if d.get("id")]
+        if not dialog_ids:
+            return
+        now = now_iso()
+        with db() as con:
+            con.executemany(
+                """
+                UPDATE auto_chat_dialogs
+                SET status=?,
+                    last_error=?,
+                    pending_incoming=0,
+                    pending_buffer_until_at=NULL,
+                    stopped_at=COALESCE(stopped_at, ?),
+                    updated_at=?
+                WHERE id=?
+                  AND status=?
+                """,
+                [
+                    (AUTO_CHAT_STATUS_ERROR, reason, now, now, dialog_id, AUTO_CHAT_STATUS_STARTING)
+                    for dialog_id in dialog_ids
+                ],
+            )
+        logger.warning(
+            "autochat marked STARTING dialogs failed account_id=%s reason=%s dialog_ids=%s",
+            account_id,
+            reason,
+            ",".join(str(x) for x in dialog_ids[:20]),
+        )
 
     def _ensure_auto_chat_handler(self, account_id: int, client: TelegramClient) -> None:
         prev = self._auto_chat_handler_client.get(account_id)
@@ -1028,7 +1116,7 @@ class Worker:
                         message_text=text_in,
                         sender_phone=None,  # в приватных диалогах телефон не сохраняется
                         sender_username=dialog.get("peer_username"),
-                        dt=datetime.utcnow(),
+                        dt=almaty_now_naive(),
                         con=con,
                     )
 
@@ -1166,7 +1254,7 @@ class Worker:
                         message_text=text_out,
                         sender_phone=None,
                         sender_username=None,  # наш аккаунт
-                        dt=datetime.utcnow(),
+                        dt=almaty_now_naive(),
                         con=con,
                     )
                     con.execute(
@@ -1350,7 +1438,7 @@ class Worker:
         cached = self._dialog_cache.get(account_id)
         if cached:
             ts, mapping = cached
-            if datetime.utcnow() - ts < timedelta(seconds=120):
+            if almaty_now_naive() - ts < timedelta(seconds=120):
                 # If cache covers all needed ids, reuse
                 if ids.issubset(mapping.keys()):
                     return mapping
@@ -1361,7 +1449,7 @@ class Worker:
             await self.client_manager.invalidate_session(account_id)
             return {}
         if mapping:
-            self._dialog_cache[account_id] = (datetime.utcnow(), mapping)
+            self._dialog_cache[account_id] = (almaty_now_naive(), mapping)
         return mapping
 
     async def _build_dialog_map(self, client: TelegramClient, ids: set) -> Dict[int, object]:

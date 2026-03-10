@@ -80,7 +80,7 @@ sudo -u "$APP_USER" bash -lc "cd '$APP_DIR/frontend' && npm run build"
 
 install -d -o "$APP_USER" -g "$APP_GROUP" "$APP_DIR/backend/var/logs" "$APP_DIR/backend/var/backups"
 
-for unit in tg-main.service tg-auth.service tg-ai.service tg-worker.service tg-web-auth.target; do
+for unit in tg-main.service tg-auth.service tg-ai.service tg-worker.service tg-web-auth.target tg-control-requests.service tg-control-requests.timer tg-daily-restart.service tg-daily-restart.timer; do
   sed \
     -e "s|/opt/tg-web-auth|$APP_DIR|g" \
     -e "s|User=tgapp|User=$APP_USER|g" \
@@ -90,6 +90,8 @@ done
 
 systemctl daemon-reload
 systemctl enable --now tg-auth.service tg-main.service tg-ai.service tg-worker.service
+systemctl enable --now tg-control-requests.timer
+systemctl enable --now tg-daily-restart.timer
 
 sed \
   -e "s|example.com|$BASE_DOMAIN|g" \
@@ -109,4 +111,4 @@ echo "1) Edit $APP_DIR/.env and set real TG/DeepSeek secrets"
 echo "2) Update FRONTEND_ORIGINS to include https://$FRONTEND_HOST"
 echo "3) Restart services: systemctl restart tg-auth tg-main tg-ai tg-worker"
 echo "4) Configure TLS (recommended): certbot --nginx -d $FRONTEND_HOST -d api.$BASE_DOMAIN -d auth.$BASE_DOMAIN"
-echo "5) Check status: systemctl status tg-auth tg-main tg-ai tg-worker --no-pager"
+echo "5) Check status: systemctl status tg-auth tg-main tg-ai tg-worker tg-control-requests.timer tg-daily-restart.timer --no-pager"

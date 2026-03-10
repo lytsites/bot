@@ -1,4 +1,5 @@
 import React from 'react'
+import { formatDateTime } from '../time'
 
 export default function MonitoringAdminListeningHistory({
   adminMatches,
@@ -31,7 +32,7 @@ export default function MonitoringAdminListeningHistory({
       <div className="log-list lg">
         {adminMatches.map(m => (
           <div className="log-item" key={`m-${m.id}`}>
-            <span>{new Date(m.created_at).toLocaleString()}</span>
+            <span>{formatDateTime(m.created_at)}</span>
             <div>{m.message_text || '—'}</div>
             <div className="muted">Акк: {m.account_id} • Чат: {m.chat_id} • Msg: {m.message_id}</div>
           </div>

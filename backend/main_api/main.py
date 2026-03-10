@@ -16,6 +16,7 @@ from common.auth import create_session, hash_password, revoke_token, verify_toke
 from common.config import FRONTEND_ORIGINS, TG_API_HASH, TG_API_ID
 from common.crypto import decrypt_text
 from common.db import db, init_db
+from common.timezone import almaty_now_naive, now_iso, parse_iso_local
 from common.users import (
     ROLE_ADMIN,
     ROLE_SUPER_ADMIN,
@@ -27,6 +28,12 @@ from common.users import (
     role_to_str,
 )
 from common.logging_setup import get_logger, request_id_middleware, setup_logging
+from common.service_restarts import (
+    RESTARTABLE_SERVICES,
+    RESTARTABLE_SERVICES_BY_KEY,
+    RESTART_COOLDOWN_SECONDS,
+)
+from common.system_flags import get_system_restarting
 from common.telegram_alerts import notify_support_request
 from ai.defaults import load_support_site_structure_instruction
 from telethon import TelegramClient
@@ -51,11 +58,6 @@ app.add_middleware(
 )
 
 init_db()
-
-
-def now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
 def _compile_keywords_patterns_csv(raw: str) -> list[re.Pattern]:
     parts = [p.strip() for p in str(raw or "").split(",")]
     parts = [p for p in parts if p]
@@ -140,7 +142,7 @@ def _user_agent(request: Request) -> str:
 
 
 def _current_login_fail_counts(con: sqlite3.Connection, login: str, ip: str) -> tuple[int, int]:
-    since = (datetime.utcnow() - timedelta(minutes=LOGIN_RATE_WINDOW_MINUTES)).isoformat()
+    since = (almaty_now_naive() - timedelta(minutes=LOGIN_RATE_WINDOW_MINUTES)).isoformat()
     login_fail_count = con.execute(
         """
         SELECT COUNT(*) AS cnt
@@ -211,6 +213,13 @@ def health(request: Request):
 @app.get("/ai/status")
 def ai_status(request: Request, probe: bool = Query(False)):
     require_auth(request)
+    with db() as con:
+        restart_flag = get_system_restarting(con)
+    restart_payload = {
+        "system_restarting": bool(restart_flag),
+        "system_restart_reason": (restart_flag or {}).get("value_text", ""),
+        "system_restart_until": (restart_flag or {}).get("expires_at"),
+    }
     try:
         r = httpx.get(
             f"{AI_API_URL}/ai/health",
@@ -224,12 +233,12 @@ def ai_status(request: Request, probe: bool = Query(False)):
                 code = str(data.get("detail") or data.get("error") or "").strip()
             except Exception:
                 code = ""
-            return {"ok": False, "error": code or "AI_UNAVAILABLE"}
+            return {"ok": False, "error": code or "AI_UNAVAILABLE", **restart_payload}
         data = r.json()
-        return {"ok": True, **data}
+        return {"ok": True, **data, **restart_payload}
     except Exception as e:
         logger.info("ai status failed: %s: %s", type(e).__name__, e)
-        return {"ok": False, "error": "AI_UNAVAILABLE"}
+        return {"ok": False, "error": "AI_UNAVAILABLE", **restart_payload}
 
 
 class LoginReq(BaseModel):
@@ -1772,6 +1781,62 @@ def require_super_admin(request: Request) -> int:
     return user_id
 
 
+def _service_restart_row(con: sqlite3.Connection, service_key: str):
+    return con.execute(
+        """
+        SELECT
+            r.id,
+            r.service_key,
+            r.system_unit,
+            r.requested_by_user_id,
+            r.requested_at,
+            r.status,
+            r.processed_at,
+            r.error_message,
+            u.login AS requested_by_login
+        FROM service_restart_requests r
+        LEFT JOIN local_users u ON u.id = r.requested_by_user_id
+        WHERE r.service_key=?
+        ORDER BY r.requested_at DESC, r.id DESC
+        LIMIT 1
+        """,
+        (service_key,),
+    ).fetchone()
+
+
+def _serialize_service_restart(service, row) -> dict:
+    payload = {
+        "service_key": service.key,
+        "label": service.label,
+        "system_unit": service.unit,
+        "cooldown_seconds": RESTART_COOLDOWN_SECONDS,
+        "can_request": True,
+        "cooldown_until": None,
+        "last_request": None,
+    }
+    if not row:
+        return payload
+    requested_at = parse_iso_local(row["requested_at"])
+    cooldown_until = None
+    can_request = True
+    if requested_at is not None:
+        cooldown_until_dt = requested_at + timedelta(seconds=RESTART_COOLDOWN_SECONDS)
+        cooldown_until = cooldown_until_dt.isoformat()
+        can_request = cooldown_until_dt <= almaty_now_naive()
+    payload["can_request"] = can_request
+    payload["cooldown_until"] = cooldown_until
+    payload["last_request"] = {
+        "id": row["id"],
+        "requested_by_user_id": row["requested_by_user_id"],
+        "requested_by_login": row["requested_by_login"],
+        "requested_at": row["requested_at"],
+        "status": row["status"],
+        "processed_at": row["processed_at"],
+        "error_message": row["error_message"],
+    }
+    return payload
+
+
 def _safe_parse_triage_json(text: str) -> dict:
     raw = (text or "").strip()
     if not raw:
@@ -2246,9 +2311,25 @@ def admin_list_users(request: Request):
         try:
             rows = con.execute(
                 """
-                SELECT id, login, is_admin, role, is_active, created_at, updated_at,
-                       service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment
-                FROM local_users
+                SELECT
+                    u.id,
+                    u.login,
+                    u.is_admin,
+                    u.role,
+                    u.is_active,
+                    u.created_at,
+                    u.updated_at,
+                    u.service_enabled,
+                    u.feature_group_reading_enabled,
+                    u.feature_auto_dialogs_enabled,
+                    u.disabled_comment,
+                    (
+                        SELECT MAX(lla.created_at)
+                        FROM local_login_attempts lla
+                        WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
+                          AND lla.success = 1
+                    ) AS last_online_at
+                FROM local_users u
                 ORDER BY id DESC
                 """,
             ).fetchall()
@@ -2268,8 +2349,20 @@ def admin_list_users(request: Request):
         except Exception:
             rows = con.execute(
                 """
-                SELECT id, login, is_admin, is_active, created_at, updated_at
-                FROM local_users
+                SELECT
+                    u.id,
+                    u.login,
+                    u.is_admin,
+                    u.is_active,
+                    u.created_at,
+                    u.updated_at,
+                    (
+                        SELECT MAX(lla.created_at)
+                        FROM local_login_attempts lla
+                        WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
+                          AND lla.success = 1
+                    ) AS last_online_at
+                FROM local_users u
                 ORDER BY id DESC
                 """,
             ).fetchall()
@@ -2311,6 +2404,42 @@ def admin_user_login_history(
             (user_id, user["login"], limit, offset),
         ).fetchall()
     return {"user_id": user_id, "total": int(total or 0), "limit": limit, "offset": offset, "items": [dict(r) for r in rows]}
+
+
+@app.get("/admin/system/restarts")
+def admin_list_service_restarts(request: Request):
+    require_admin(request)
+    with db() as con:
+        items = []
+        for service in RESTARTABLE_SERVICES:
+            row = _service_restart_row(con, service.key)
+            items.append(_serialize_service_restart(service, row))
+    return {"items": items}
+
+
+@app.post("/admin/system/restarts/{service_key}")
+def admin_request_service_restart(service_key: str, request: Request):
+    actor_id = require_admin(request)
+    service = RESTARTABLE_SERVICES_BY_KEY.get(str(service_key or "").strip())
+    if not service:
+        raise HTTPException(404, "SERVICE_NOT_FOUND")
+    with db() as con:
+        latest = _service_restart_row(con, service.key)
+        if latest:
+            requested_at = parse_iso_local(latest["requested_at"])
+            if requested_at is not None:
+                cooldown_until = requested_at + timedelta(seconds=RESTART_COOLDOWN_SECONDS)
+                if cooldown_until > almaty_now_naive():
+                    raise HTTPException(429, "RESTART_COOLDOWN_ACTIVE")
+        con.execute(
+            """
+            INSERT INTO service_restart_requests(service_key, system_unit, requested_by_user_id, requested_at, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (service.key, service.unit, actor_id, now_iso(), "PENDING"),
+        )
+        row = _service_restart_row(con, service.key)
+    return {"ok": True, "item": _serialize_service_restart(service, row)}
 
 
 @app.post("/admin/users")
@@ -2852,6 +2981,131 @@ def admin_resolve_error(source: str, source_id: str, request: Request):
     return {"ok": True, "source": src, "source_id": sid, "is_resolved": True}
 
 
+@app.post("/admin/errors/resolve_all")
+def admin_resolve_all_errors(request: Request):
+    admin_user_id = require_super_admin(request)
+    now = now_iso()
+    with db() as con:
+        rows = con.execute(
+            """
+            SELECT source, source_id
+            FROM (
+                SELECT 'events' AS source, CAST(e.id AS TEXT) AS source_id
+                FROM events e
+                WHERE UPPER(COALESCE(e.level, ''))='ERROR'
+
+                UNION
+
+                SELECT 'jobs' AS source, CAST(j.id AS TEXT) AS source_id
+                FROM jobs j
+                WHERE j.status='FAILED' OR COALESCE(j.last_error, '')<>''
+
+                UNION
+
+                SELECT 'group_worker_runs' AS source, CAST(gwr.id AS TEXT) AS source_id
+                FROM group_worker_runs gwr
+                WHERE COALESCE(gwr.last_error, '')<>''
+
+                UNION
+
+                SELECT 'auto_chat_dialogs' AS source, CAST(d.id AS TEXT) AS source_id
+                FROM auto_chat_dialogs d
+                WHERE d.status='ERROR' OR COALESCE(d.last_error, '')<>''
+
+                UNION
+
+                SELECT 'auth_flows' AS source, COALESCE(af.auth_id, '') AS source_id
+                FROM auth_flows af
+                WHERE af.status='ERROR' OR COALESCE(af.error_message, '')<>''
+
+                UNION
+
+                SELECT 'support_tickets' AS source, CAST(st.id AS TEXT) AS source_id
+                FROM support_tickets st
+                WHERE st.route='ESCALATED' OR st.status='ESCALATED'
+            ) x
+            LEFT JOIN incident_resolution ir
+              ON ir.source = x.source AND ir.source_id = x.source_id
+            WHERE COALESCE(x.source_id, '')<>''
+              AND COALESCE(ir.is_resolved, 0)=0
+            """
+        ).fetchall()
+
+        resolved = 0
+        for row in rows:
+            src = str(row["source"] or "").strip().lower()
+            sid = str(row["source_id"] or "").strip()
+            if src not in INCIDENT_SOURCES or not sid:
+                continue
+
+            exists = False
+            if src == "events":
+                exists = con.execute(
+                    "SELECT 1 FROM events WHERE id=? AND UPPER(COALESCE(level,''))='ERROR'",
+                    (sid,),
+                ).fetchone() is not None
+            elif src == "jobs":
+                exists = con.execute(
+                    "SELECT 1 FROM jobs WHERE id=? AND (status='FAILED' OR COALESCE(last_error,'')<>'')",
+                    (sid,),
+                ).fetchone() is not None
+            elif src == "group_worker_runs":
+                exists = con.execute(
+                    "SELECT 1 FROM group_worker_runs WHERE id=? AND COALESCE(last_error,'')<>''",
+                    (sid,),
+                ).fetchone() is not None
+            elif src == "auto_chat_dialogs":
+                exists = con.execute(
+                    "SELECT 1 FROM auto_chat_dialogs WHERE id=? AND (status='ERROR' OR COALESCE(last_error,'')<>'')",
+                    (sid,),
+                ).fetchone() is not None
+            elif src == "auth_flows":
+                exists = con.execute(
+                    "SELECT 1 FROM auth_flows WHERE auth_id=? AND (status='ERROR' OR COALESCE(error_message,'')<>'')",
+                    (sid,),
+                ).fetchone() is not None
+            elif src == "support_tickets":
+                try:
+                    ticket_id = int(sid)
+                except Exception:
+                    continue
+                row_ticket = _support_ticket_row_admin(con, ticket_id)
+                exists = row_ticket is not None
+                if row_ticket and str(row_ticket["status"] or "") != SUPPORT_STATUS_RESOLVED:
+                    con.execute(
+                        """
+                        UPDATE support_tickets
+                        SET status=?, resolved_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (SUPPORT_STATUS_RESOLVED, now, now, ticket_id),
+                    )
+                    _support_add_message(
+                        con,
+                        ticket_id=ticket_id,
+                        sender_type="SYSTEM",
+                        message="РЎСѓРїРµСЂ-Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂ РїРѕРјРµС‚РёР» РѕР±СЂР°С‰РµРЅРёРµ РєР°Рє СЂРµС€РµРЅРЅРѕРµ.",
+                        meta={"event": "RESOLVED_BY_SUPERADMIN", "resolved_by_user_id": admin_user_id},
+                    )
+            if not exists:
+                continue
+
+            con.execute(
+                """
+                INSERT INTO incident_resolution(source, source_id, is_resolved, resolved_at, resolved_by_user_id, updated_at)
+                VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET
+                    is_resolved=1,
+                    resolved_at=excluded.resolved_at,
+                    resolved_by_user_id=excluded.resolved_by_user_id,
+                    updated_at=excluded.updated_at
+                """,
+                (src, sid, now, admin_user_id, now),
+            )
+            resolved += 1
+    return {"ok": True, "resolved": resolved}
+
+
 @app.get("/admin/group_matches")
 def admin_group_matches(
     request: Request,
@@ -3168,8 +3422,10 @@ def _get_cached_groups(account_id: int, max_age_sec: int):
         ).fetchone()
         if not row or not row["last_update"]:
             return None
-        last_update = datetime.fromisoformat(row["last_update"])
-        if datetime.utcnow() - last_update > timedelta(seconds=max_age_sec):
+        last_update = parse_iso_local(row["last_update"])
+        if not last_update:
+            return None
+        if almaty_now_naive() - last_update > timedelta(seconds=max_age_sec):
             return None
         rows = con.execute(
             """
