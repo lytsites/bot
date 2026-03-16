@@ -514,12 +514,36 @@ button:disabled {
   background: var(--surface);
 }
 
+.qr-box-loading {
+  min-height: 248px;
+  align-content: center;
+}
+
+.qr-loader {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 4px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-top-color: var(--brand);
+  animation: qr-loader-spin 0.9s linear infinite;
+}
+
 .qr-box img {
   width: 180px;
   height: 180px;
   object-fit: contain;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(31, 36, 48, 0.12);
+}
+
+@keyframes qr-loader-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status {

@@ -658,6 +658,44 @@ def cancel_auth(auth_id: str) -> dict:
     return {"auth_id": row["auth_id"], "status": STATUS_CANCELLED}
 
 
+def cancel_all_active_auths() -> dict:
+    active_statuses = (
+        STATUS_NEW,
+        STATUS_CODE_SENT,
+        STATUS_WAIT_PASSWORD,
+        STATUS_QR_INIT,
+        STATUS_QR_READY,
+        STATUS_QR_WAIT_CONFIRM,
+    )
+    placeholders = ",".join("?" for _ in active_statuses)
+    with db() as con:
+        rows = con.execute(
+            f"""
+            SELECT auth_id, account_id
+            FROM auth_flows
+            WHERE status IN ({placeholders})
+            """,
+            active_statuses,
+        ).fetchall()
+        auth_ids = [str(row["auth_id"] or "").strip() for row in rows if str(row["auth_id"] or "").strip()]
+        account_ids = [int(row["account_id"] or 0) for row in rows if int(row["account_id"] or 0)]
+        if auth_ids:
+            auth_placeholders = ",".join("?" for _ in auth_ids)
+            con.execute(
+                f"""
+                UPDATE auth_flows
+                SET status=?, error_message=NULL
+                WHERE auth_id IN ({auth_placeholders})
+                """,
+                (STATUS_CANCELLED, *auth_ids),
+            )
+    for account_id in account_ids:
+        _log_event(account_id, "WARN", "auth cancelled by admin cleanup")
+    for auth_id in auth_ids:
+        _qr_disconnect(auth_id)
+    return {"ok": True, "cancelled_count": len(auth_ids)}
+
+
 class QRFlowState:
     def __init__(self, client: TelegramClient, qr_login, auth_id: str):
         self.client = client

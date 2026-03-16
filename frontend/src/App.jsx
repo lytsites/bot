@@ -26,6 +26,7 @@ export default function App() {
   const [qrRefreshAfter, setQrRefreshAfter] = useState('')
   const [qrErr, setQrErr] = useState('')
   const [qrSubmitting, setQrSubmitting] = useState(false)
+  const [qrLoading, setQrLoading] = useState(false)
 
   const [accounts, setAccounts] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -143,6 +144,7 @@ export default function App() {
   const [serviceRestartLoading, setServiceRestartLoading] = useState(false)
   const [serviceRestartReloading, setServiceRestartReloading] = useState(false)
   const [restartingServiceKey, setRestartingServiceKey] = useState('')
+  const [clearingAuths, setClearingAuths] = useState(false)
   const [pendingRestartServiceKey, setPendingRestartServiceKey] = useState('')
   const [pendingRestartServiceLabel, setPendingRestartServiceLabel] = useState('')
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -485,6 +487,19 @@ export default function App() {
     }
   }
 
+  async function clearAllAuths() {
+    setClearingAuths(true)
+    try {
+      const r = await mainPost('/admin/system/auth/clear_all', {})
+      const cancelledCount = Number(r?.cancelled_count || 0)
+      pushToast('success', 'Авторизации очищены', `Принудительно завершено авторизаций: ${cancelledCount}`)
+    } catch (e) {
+      pushToast('error', 'Ошибка', formatError(e), 6000)
+    } finally {
+      setClearingAuths(false)
+    }
+  }
+
   async function loadAdminErrors(offset = adminErrorsOffset, limit = adminErrorsLimit) {
     setAdminErrorsErr('')
     setAdminErrorsLoading(true)
@@ -748,6 +763,11 @@ export default function App() {
 
   async function startQr() {
     setQrErr('')
+    setQrLoading(true)
+    setQrStatus('')
+    setQrDataUrl('')
+    setQrExpiresAt('')
+    setQrRefreshAfter('')
     try {
       const r = await authPost('/auth/qr/start', {})
       setQrAuthId(r.auth_id)
@@ -757,6 +777,8 @@ export default function App() {
       setQrRefreshAfter(r.refresh_after || '')
     } catch (e) {
       setQrErr(formatError(e))
+    } finally {
+      setQrLoading(false)
     }
   }
 
@@ -796,6 +818,7 @@ export default function App() {
     setQrRefreshAfter('')
     setQrErr('')
     setQrSubmitting(false)
+    setQrLoading(false)
   }
 
   async function cancelQr() {
@@ -2477,8 +2500,10 @@ export default function App() {
     err: serviceRestartErr,
     reloading: serviceRestartReloading,
     restartingKey: restartingServiceKey,
+    clearingAuths,
     reload: () => loadServiceRestarts({ silent: true }).catch(() => {}),
     requestRestart: requestServiceRestart,
+    clearAllAuths,
   }
 
   const themeProps = {
@@ -2746,7 +2771,7 @@ export default function App() {
               <h3>QR вход</h3>
             </div>
             <div className="actions">
-              <button className="primary" onClick={startQr}>Войти по QR</button>
+              <button className="primary" onClick={startQr} disabled={qrLoading || Boolean(qrAuthId)}>Войти по QR</button>
               <button className="danger" onClick={cancelQr} disabled={!qrAuthId || qrStopped}>Отменить</button>
               <button className="ghost" onClick={continueQr} disabled={!qrAuthId || qrStopped || qrSubmitting}>Проверить</button>
             </div>
@@ -2761,6 +2786,13 @@ export default function App() {
                   <span>Действителен до</span>
                   <strong>{qrExpiresAt || '—'}</strong>
                 </div>
+              </div>
+            )}
+
+            {(qrLoading || (qrAuthId && !qrDataUrl && !qrStopped)) && (
+              <div className="qr-box qr-box-loading">
+                <div className="qr-loader" aria-hidden="true" />
+                <div className="muted">QR-код подготавливается...</div>
               </div>
             )}
 
@@ -2788,7 +2820,7 @@ export default function App() {
             )}
 
             {qrStopped && (
-              <button className="ghost" onClick={startQr}>Начать новый QR</button>
+              <button className="ghost" onClick={startQr} disabled={qrLoading || Boolean(qrAuthId)}>Начать новый QR</button>
             )}
 
             {qrErr && <div className="status error">{qrErr}</div>}

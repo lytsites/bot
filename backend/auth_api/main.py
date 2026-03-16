@@ -8,6 +8,7 @@ from common.config import FRONTEND_ORIGINS
 from common.db import db
 from common.db import init_db
 from common.logging_setup import get_logger, request_id_middleware, setup_logging
+from common.users import ROLE_ADMIN, get_user_role
 
 
 setup_logging()
@@ -32,6 +33,15 @@ def require_auth(request: Request) -> int:
     user_id = verify_token(token)
     if not user_id:
         raise HTTPException(401, "UNAUTHORIZED")
+    return user_id
+
+
+def require_admin(request: Request) -> int:
+    user_id = require_auth(request)
+    with db() as con:
+        role = get_user_role(con, user_id)
+    if int(role) < ROLE_ADMIN:
+        raise HTTPException(403, "FORBIDDEN")
     return user_id
 
 
@@ -181,3 +191,13 @@ def qr_continue(req: QrContinueReq, request: Request):
     except Exception as e:
         logger.exception("qr continue failed")
         raise HTTPException(400, "QR_CONTINUE_FAILED")
+
+
+@app.post("/admin/auth/clear_all")
+def admin_clear_all_auths(request: Request):
+    require_admin(request)
+    try:
+        return telegram_auth.cancel_all_active_auths()
+    except Exception:
+        logger.exception("admin clear all auths failed")
+        raise HTTPException(500, "CLEAR_ALL_AUTHS_FAILED")

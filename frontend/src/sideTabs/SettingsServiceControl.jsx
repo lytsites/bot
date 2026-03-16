@@ -7,8 +7,10 @@ export default function SettingsServiceControl({
   err,
   reloading,
   restartingKey,
+  clearingAuths,
   reload,
   requestRestart,
+  clearAllAuths,
 }) {
   const rows = Array.isArray(items) ? items : []
 
@@ -16,13 +18,22 @@ export default function SettingsServiceControl({
     <section className="panel">
       <div className="panel-head">
         <h2>Перезапуск сервисов</h2>
-        <button className="ghost" onClick={reload} disabled={loading || reloading}>
-          Обновить
-        </button>
+        <div className="row-actions">
+          <button className="danger" onClick={clearAllAuths} disabled={loading || reloading || clearingAuths}>
+            Очистить все авторизации
+          </button>
+          <button className="ghost" onClick={reload} disabled={loading || reloading || clearingAuths}>
+            Обновить
+          </button>
+        </div>
       </div>
 
       <p className="muted">
-        Каждый сервис можно перезапускать не чаще одного раза в 24 часа. Запрос ставится в очередь и выполняется root-helper на сервере.
+        Каждый сервис можно перезапускать не чаще одного раза в 24 часа. Запрос ставится в очередь и выполняется
+        root-helper на сервере.
+      </p>
+      <p className="muted">
+        Очистка авторизаций принудительно завершает все текущие входы Telegram, включая активные QR-сессии.
       </p>
 
       {err && <div className="status error">{err}</div>}
@@ -33,7 +44,7 @@ export default function SettingsServiceControl({
           {rows.map(item => {
             const last = item?.last_request || null
             const pending = last?.status === 'PENDING' || last?.status === 'PROCESSING'
-            const disabled = pending || !item?.can_request || restartingKey === item?.service_key
+            const disabled = pending || !item?.can_request || restartingKey === item?.service_key || clearingAuths
             return (
               <div className="row" key={item.service_key}>
                 <div>

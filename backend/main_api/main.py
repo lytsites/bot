@@ -2442,6 +2442,31 @@ def admin_request_service_restart(service_key: str, request: Request):
     return {"ok": True, "item": _serialize_service_restart(service, row)}
 
 
+@app.post("/admin/system/auth/clear_all")
+def admin_clear_all_auths(request: Request):
+    require_admin(request)
+    token = request.headers.get("X-Auth-Token")
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.post(
+                "http://127.0.0.1:8001/admin/auth/clear_all",
+                headers={"X-Auth-Token": token or ""},
+            )
+    except httpx.HTTPError:
+        raise HTTPException(502, "AUTH_SERVICE_UNAVAILABLE")
+    if resp.status_code >= 400:
+        detail = None
+        try:
+            detail = resp.json().get("detail")
+        except Exception:
+            detail = None
+        raise HTTPException(resp.status_code, detail or "CLEAR_ALL_AUTHS_FAILED")
+    try:
+        return resp.json()
+    except Exception:
+        raise HTTPException(502, "AUTH_SERVICE_BAD_RESPONSE")
+
+
 @app.post("/admin/users")
 def admin_create_user(req: AdminUserCreateReq, request: Request):
     actor_id = require_admin(request)
