@@ -61,10 +61,13 @@ export default function HomeAutoChatHistory({
         homeAutoChatHistoryActive.peer_display_name ||
         homeAutoChatHistoryActive.peer_username ||
         String(homeAutoChatHistoryActive.peer_tg_user_id || 'dialog')
+      const rect = threadRef.current.getBoundingClientRect()
       const result = await exportChatThreadAsZip({
-        threadEl: threadRef.current,
+        messages: homeAutoChatHistoryMessages,
         title,
         dialogId: homeAutoChatHistoryActive.dialog_id,
+        viewportWidth: rect.width,
+        viewportHeight: rect.height,
       })
       setExportStatus(`Архив готов: ${result.pageCount} экранов`)
     } catch (e) {

@@ -1,5 +1,6 @@
 import html2canvas from 'html2canvas'
 import JSZip from 'jszip'
+import { formatTime } from '../time'
 
 function sanitizeFilePart(value, fallback = 'dialog') {
   const cleaned = String(value || '')
@@ -36,57 +37,76 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function resolveColorValue(value, fallback = '') {
-  if (!value) return fallback
-  const probe = document.createElement('span')
-  probe.style.color = String(value)
-  document.body.appendChild(probe)
-  const resolved = getComputedStyle(probe).color || fallback
-  probe.remove()
-  return resolved
+function createMessageRow(message) {
+  const outgoing = String(message?.direction || '').toUpperCase() !== 'IN'
+
+  const row = document.createElement('div')
+  row.style.display = 'flex'
+  row.style.justifyContent = outgoing ? 'flex-end' : 'flex-start'
+  row.style.marginBottom = '10px'
+  row.style.width = '100%'
+  row.style.boxSizing = 'border-box'
+  row.style.pageBreakInside = 'avoid'
+
+  const bubble = document.createElement('div')
+  bubble.style.maxWidth = '78%'
+  bubble.style.borderRadius = '18px'
+  bubble.style.padding = '12px 14px 10px'
+  bubble.style.background = outgoing ? 'rgb(56, 86, 170)' : 'rgb(45, 52, 67)'
+  bubble.style.color = 'rgb(244, 247, 252)'
+  bubble.style.fontSize = '14px'
+  bubble.style.lineHeight = '1.4'
+  bubble.style.whiteSpace = 'pre-wrap'
+  bubble.style.wordBreak = 'break-word'
+  bubble.style.boxSizing = 'border-box'
+  bubble.style.border = outgoing ? '1px solid rgb(94, 126, 219)' : '1px solid rgb(66, 73, 91)'
+
+  const text = document.createElement('div')
+  text.textContent = String(message?.text || '')
+  text.style.whiteSpace = 'pre-wrap'
+  text.style.wordBreak = 'break-word'
+
+  const meta = document.createElement('div')
+  meta.textContent = formatTime(message?.created_at)
+  meta.style.marginTop = '8px'
+  meta.style.fontSize = '11px'
+  meta.style.opacity = '0.82'
+  meta.style.textAlign = outgoing ? 'right' : 'left'
+
+  bubble.appendChild(text)
+  bubble.appendChild(meta)
+  row.appendChild(bubble)
+  return row
 }
 
-function copySafeStyles(sourceEl, targetEl) {
-  const computed = getComputedStyle(sourceEl)
-  targetEl.style.color = resolveColorValue(computed.color, '#ffffff')
-  targetEl.style.backgroundColor = resolveColorValue(computed.backgroundColor, 'transparent')
-  targetEl.style.borderTopColor = resolveColorValue(computed.borderTopColor, 'transparent')
-  targetEl.style.borderRightColor = resolveColorValue(computed.borderRightColor, 'transparent')
-  targetEl.style.borderBottomColor = resolveColorValue(computed.borderBottomColor, 'transparent')
-  targetEl.style.borderLeftColor = resolveColorValue(computed.borderLeftColor, 'transparent')
-  targetEl.style.outlineColor = resolveColorValue(computed.outlineColor, 'transparent')
-  targetEl.style.textDecorationColor = resolveColorValue(computed.textDecorationColor, targetEl.style.color)
-  targetEl.style.caretColor = resolveColorValue(computed.caretColor, targetEl.style.color)
-  targetEl.style.fill = resolveColorValue(computed.fill, targetEl.style.color)
-  targetEl.style.stroke = resolveColorValue(computed.stroke, 'none')
+function createPageShell(viewportWidth, viewportHeight) {
+  const page = document.createElement('div')
+  page.style.width = `${viewportWidth}px`
+  page.style.height = `${viewportHeight}px`
+  page.style.padding = '16px'
+  page.style.boxSizing = 'border-box'
+  page.style.overflow = 'hidden'
+  page.style.borderRadius = '24px'
+  page.style.background = 'rgb(24, 30, 43)'
+  page.style.display = 'flex'
+  page.style.flexDirection = 'column'
+  page.style.gap = '0'
 
-  // Decorative effects make html2canvas choke on modern color syntaxes and are not critical for archive screenshots.
-  targetEl.style.boxShadow = 'none'
-  targetEl.style.textShadow = 'none'
-  targetEl.style.filter = 'none'
-  targetEl.style.backdropFilter = 'none'
-  targetEl.style.backgroundImage = 'none'
+  const thread = document.createElement('div')
+  thread.style.flex = '1'
+  thread.style.minHeight = '0'
+  thread.style.overflow = 'hidden'
+  thread.style.borderRadius = '20px'
+  thread.style.padding = '16px'
+  thread.style.boxSizing = 'border-box'
+  thread.style.background = 'rgb(32, 39, 54)'
+  thread.style.display = 'block'
+
+  page.appendChild(thread)
+  return { page, thread }
 }
 
-function sanitizeCloneStyles(sourceRoot, targetRoot) {
-  const sourceNodes = [sourceRoot, ...sourceRoot.querySelectorAll('*')]
-  const targetNodes = [targetRoot, ...targetRoot.querySelectorAll('*')]
-  const total = Math.min(sourceNodes.length, targetNodes.length)
-  for (let index = 0; index < total; index += 1) {
-    copySafeStyles(sourceNodes[index], targetNodes[index])
-  }
-}
-
-export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
-  if (!threadEl) throw new Error('EXPORT_THREAD_NOT_FOUND')
-
-  const rect = threadEl.getBoundingClientRect()
-  const viewportWidth = Math.max(320, Math.round(rect.width || threadEl.clientWidth || 360))
-  const viewportHeight = Math.max(420, Math.round(rect.height || threadEl.clientHeight || 640))
-  const contentHeight = Math.max(threadEl.scrollHeight || 0, threadEl.clientHeight || 0)
-  const pageCount = Math.max(1, Math.ceil(contentHeight / viewportHeight))
-  const scale = Math.min(window.devicePixelRatio || 1, 2)
-
+function buildPages({ messages, viewportWidth, viewportHeight }) {
   const host = document.createElement('div')
   host.style.position = 'fixed'
   host.style.left = '-100000px'
@@ -94,28 +114,48 @@ export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
   host.style.pointerEvents = 'none'
   host.style.opacity = '1'
   host.style.zIndex = '-1'
-
-  const viewport = document.createElement('div')
-  viewport.style.width = `${viewportWidth}px`
-  viewport.style.height = `${viewportHeight}px`
-  viewport.style.overflow = 'hidden'
-  viewport.style.borderRadius = '24px'
-  viewport.style.background = getComputedStyle(document.body).backgroundColor || '#0f1720'
-
-  const clone = threadEl.cloneNode(true)
-  clone.style.width = `${viewportWidth}px`
-  clone.style.height = 'auto'
-  clone.style.maxHeight = 'none'
-  clone.style.minHeight = `${contentHeight}px`
-  clone.style.overflow = 'visible'
-  clone.style.transform = 'translateY(0)'
-
-  viewport.appendChild(clone)
-  host.appendChild(viewport)
   document.body.appendChild(host)
 
   try {
-    sanitizeCloneStyles(threadEl, clone)
+    const pages = []
+    let current = createPageShell(viewportWidth, viewportHeight)
+    host.appendChild(current.page)
+    pages.push(current.page)
+
+    for (const message of messages) {
+      const row = createMessageRow(message)
+      current.thread.appendChild(row)
+      if (current.thread.scrollHeight > current.thread.clientHeight && current.thread.childElementCount > 1) {
+        current.thread.removeChild(row)
+        current = createPageShell(viewportWidth, viewportHeight)
+        host.appendChild(current.page)
+        pages.push(current.page)
+        current.thread.appendChild(row)
+      }
+    }
+
+    return { host, pages }
+  } catch (error) {
+    host.remove()
+    throw error
+  }
+}
+
+export async function exportChatThreadAsZip({ messages, title, dialogId, viewportWidth, viewportHeight }) {
+  const items = Array.isArray(messages) ? messages : []
+  if (!items.length) throw new Error('EXPORT_NO_MESSAGES')
+
+  const safeWidth = Math.max(320, Math.round(viewportWidth || 360))
+  const safeHeight = Math.max(420, Math.round(viewportHeight || 640))
+  const scale = Math.min(window.devicePixelRatio || 1, 2)
+
+  const { host, pages } = buildPages({
+    messages: items,
+    viewportWidth: safeWidth,
+    viewportHeight: safeHeight,
+  })
+
+  try {
     await nextFrame()
 
     const zip = new JSZip()
@@ -127,16 +167,13 @@ export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
       [
         `dialog_id=${dialogId ?? ''}`,
         `title=${title || ''}`,
-        `screens=${pageCount}`,
-        `viewport=${viewportWidth}x${viewportHeight}`,
+        `screens=${pages.length}`,
+        `viewport=${safeWidth}x${safeHeight}`,
       ].join('\n')
     )
 
-    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
-      const offset = pageIndex * viewportHeight
-      clone.style.transform = `translateY(-${offset}px)`
-      await nextFrame()
-      const canvas = await html2canvas(viewport, {
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+      const canvas = await html2canvas(pages[pageIndex], {
         backgroundColor: null,
         scale,
         useCORS: true,
@@ -148,7 +185,7 @@ export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
 
     const archiveBlob = await zip.generateAsync({ type: 'blob' })
     triggerDownload(archiveBlob, `${baseName}.zip`)
-    return { pageCount }
+    return { pageCount: pages.length }
   } finally {
     host.remove()
   }
