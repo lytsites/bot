@@ -331,7 +331,8 @@ def local_me(request: Request):
             row = con.execute(
                 """
                 SELECT id, login, is_admin, role, is_active, created_at,
-                       service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment
+                       service_enabled, feature_group_reading_enabled, feature_auto_dialogs_enabled, disabled_comment,
+                       last_online_at
                 FROM local_users
                 WHERE id=?
                 """,
@@ -339,7 +340,7 @@ def local_me(request: Request):
             ).fetchone()
         except Exception:
             row = con.execute(
-                "SELECT id, login, is_admin, is_active, created_at FROM local_users WHERE id=?",
+                "SELECT id, login, is_admin, is_active, created_at, last_online_at FROM local_users WHERE id=?",
                 (user_id,),
             ).fetchone()
     if not row:
@@ -355,6 +356,15 @@ def local_me(request: Request):
     d["feature_auto_dialogs_enabled"] = bool(_int01(d.get("feature_auto_dialogs_enabled"), default=1))
     d["disabled_comment"] = (d.get("disabled_comment") or "").strip()
     return d
+
+
+@app.post("/local/presence")
+def local_presence_heartbeat(request: Request):
+    user_id = require_auth(request, allow_disabled=True)
+    current = now_iso()
+    with db() as con:
+        con.execute("UPDATE local_users SET last_online_at=? WHERE id=?", (current, user_id))
+    return {"ok": True, "last_online_at": current}
 
 
 class SettingsReq(BaseModel):
@@ -2319,15 +2329,19 @@ def admin_list_users(request: Request):
                     u.is_active,
                     u.created_at,
                     u.updated_at,
+                    u.last_online_at,
                     u.service_enabled,
                     u.feature_group_reading_enabled,
                     u.feature_auto_dialogs_enabled,
                     u.disabled_comment,
-                    (
-                        SELECT MAX(lla.created_at)
-                        FROM local_login_attempts lla
-                        WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
-                          AND lla.success = 1
+                    COALESCE(
+                        u.last_online_at,
+                        (
+                            SELECT MAX(lla.created_at)
+                            FROM local_login_attempts lla
+                            WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
+                              AND lla.success = 1
+                        )
                     ) AS last_online_at
                 FROM local_users u
                 ORDER BY id DESC
@@ -2356,11 +2370,15 @@ def admin_list_users(request: Request):
                     u.is_active,
                     u.created_at,
                     u.updated_at,
-                    (
-                        SELECT MAX(lla.created_at)
-                        FROM local_login_attempts lla
-                        WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
-                          AND lla.success = 1
+                    u.last_online_at,
+                    COALESCE(
+                        u.last_online_at,
+                        (
+                            SELECT MAX(lla.created_at)
+                            FROM local_login_attempts lla
+                            WHERE (lla.user_id = u.id OR LOWER(lla.login) = LOWER(u.login))
+                              AND lla.success = 1
+                        )
                     ) AS last_online_at
                 FROM local_users u
                 ORDER BY id DESC

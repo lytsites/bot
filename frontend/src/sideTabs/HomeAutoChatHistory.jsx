@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { Trash2 } from 'lucide-react'
 import ChatThread from '../components/ChatThread'
+import { exportChatThreadAsZip } from '../utils/exportChatScreenshots'
 
 export default function HomeAutoChatHistory({
   showScopeToggle,
@@ -21,6 +22,10 @@ export default function HomeAutoChatHistory({
   deleteMonitoringAutoDialog,
 }) {
   const items = useMemo(() => homeAutoChatDialogs || [], [homeAutoChatDialogs])
+  const threadRef = useRef(null)
+  const [exportingDialog, setExportingDialog] = useState(false)
+  const [exportStatus, setExportStatus] = useState('')
+  const [exportErr, setExportErr] = useState('')
 
   const statusLabel = status => {
     switch (status) {
@@ -46,6 +51,30 @@ export default function HomeAutoChatHistory({
     return 'neutral'
   }
 
+  const handleExportDialog = async () => {
+    if (!homeAutoChatHistoryActive?.dialog_id || !threadRef.current) return
+    setExportingDialog(true)
+    setExportErr('')
+    setExportStatus('Подготавливаю архив скринов...')
+    try {
+      const title =
+        homeAutoChatHistoryActive.peer_display_name ||
+        homeAutoChatHistoryActive.peer_username ||
+        String(homeAutoChatHistoryActive.peer_tg_user_id || 'dialog')
+      const result = await exportChatThreadAsZip({
+        threadEl: threadRef.current,
+        title,
+        dialogId: homeAutoChatHistoryActive.dialog_id,
+      })
+      setExportStatus(`Архив готов: ${result.pageCount} экранов`)
+    } catch (e) {
+      setExportErr(String(e?.message || e || 'EXPORT_FAILED'))
+      setExportStatus('')
+    } finally {
+      setExportingDialog(false)
+    }
+  }
+
   if (homeAutoChatHistoryActive) {
     const title =
       homeAutoChatHistoryActive.peer_display_name ||
@@ -55,7 +84,15 @@ export default function HomeAutoChatHistory({
     return (
       <section className="panel">
         <div className="panel-head">
-          <button className="ghost" onClick={() => setHomeAutoChatHistoryActive(null)} type="button">
+          <button
+            className="ghost"
+            onClick={() => {
+              setExportStatus('')
+              setExportErr('')
+              setHomeAutoChatHistoryActive(null)
+            }}
+            type="button"
+          >
             ← Назад
           </button>
           <h2>{title}</h2>
@@ -88,8 +125,19 @@ export default function HomeAutoChatHistory({
             >
               Обновить
             </button>
+            <button
+              className="ghost"
+              type="button"
+              disabled={exportingDialog || homeAutoChatHistoryMessagesLoading || !homeAutoChatHistoryMessages.length}
+              onClick={handleExportDialog}
+            >
+              {exportingDialog ? 'Подготовка...' : 'Скачать скринами'}
+            </button>
           </div>
         </div>
+
+        {exportStatus && <div className="status success">{exportStatus}</div>}
+        {exportErr && <div className="status error">{exportErr}</div>}
 
         {homeAutoChatHistoryMessagesLoading && <p className="muted">Загрузка...</p>}
         {!homeAutoChatHistoryMessagesLoading && homeAutoChatHistoryMessagesErr && (
@@ -97,7 +145,7 @@ export default function HomeAutoChatHistory({
         )}
         {!homeAutoChatHistoryMessagesLoading && !homeAutoChatHistoryMessagesErr && (
           <>
-            <ChatThread messages={homeAutoChatHistoryMessages} />
+            <ChatThread messages={homeAutoChatHistoryMessages} threadRef={threadRef} />
             {!homeAutoChatHistoryMessages.length && (
               <div className="muted" style={{ marginTop: 10 }}>
                 История пуста.
@@ -154,6 +202,8 @@ export default function HomeAutoChatHistory({
                 className="row-main"
                 type="button"
                 onClick={() => {
+                  setExportStatus('')
+                  setExportErr('')
                   setHomeAutoChatHistoryActive({
                     dialog_id: d.id,
                     peer_tg_user_id: d.peer_tg_user_id,
@@ -164,10 +214,10 @@ export default function HomeAutoChatHistory({
                 }}
               >
                 <div>
-                <strong>{d.peer_username || d.peer_display_name || d.peer_tg_user_id}</strong>
-                {d.peer_display_name && <span>Имя: {d.peer_display_name}</span>}
-                <span>User ID: {d.peer_tg_user_id}</span>
-                <span className={`badge ${statusBadgeClass(d.status)}`}>{statusLabel(d.status)}</span>
+                  <strong>{d.peer_username || d.peer_display_name || d.peer_tg_user_id}</strong>
+                  {d.peer_display_name && <span>Имя: {d.peer_display_name}</span>}
+                  <span>User ID: {d.peer_tg_user_id}</span>
+                  <span className={`badge ${statusBadgeClass(d.status)}`}>{statusLabel(d.status)}</span>
                 </div>
               </button>
               {isSuperAdmin && (

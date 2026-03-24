@@ -14,6 +14,7 @@ def hash_password(raw: str) -> str:
 
 def create_session(user_id: int) -> dict:
     token = str(uuid.uuid4())
+    now = now_iso()
     expires_at = add_minutes_iso(SESSION_TTL_HOURS * 60)
     with db() as con:
         con.execute(
@@ -21,8 +22,9 @@ def create_session(user_id: int) -> dict:
             INSERT INTO local_sessions(token, user_id, created_at, expires_at)
             VALUES (?, ?, ?, ?)
             """,
-            (token, user_id, now_iso(), expires_at),
+            (token, user_id, now, expires_at),
         )
+        con.execute("UPDATE local_users SET last_online_at=? WHERE id=?", (now, user_id))
     return {"token": token, "expires_at": expires_at}
 
 

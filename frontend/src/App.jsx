@@ -147,6 +147,7 @@ export default function App() {
   const [clearingAuths, setClearingAuths] = useState(false)
   const [pendingRestartServiceKey, setPendingRestartServiceKey] = useState('')
   const [pendingRestartServiceLabel, setPendingRestartServiceLabel] = useState('')
+  const lastPresencePingRef = useRef(0)
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
     try {
       return localStorage.getItem('theme') === 'dark'
@@ -497,6 +498,19 @@ export default function App() {
       pushToast('error', 'Ошибка', formatError(e), 6000)
     } finally {
       setClearingAuths(false)
+    }
+  }
+
+  async function sendPresenceHeartbeat({ force = false } = {}) {
+    if (!loggedIn || !getAuthToken()) return
+    if (!force && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    const nowMs = Date.now()
+    if (!force && nowMs - lastPresencePingRef.current < 45_000) return
+    lastPresencePingRef.current = nowMs
+    try {
+      await mainPost('/local/presence', {})
+    } catch {
+      // Ignore heartbeat failures. Session/network errors are handled elsewhere.
     }
   }
 
@@ -977,6 +991,37 @@ export default function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!loggedIn) return
+    sendPresenceHeartbeat({ force: true }).catch(() => {})
+    const intervalId = window.setInterval(() => {
+      sendPresenceHeartbeat().catch(() => {})
+    }, 60_000)
+    const onFocus = () => {
+      sendPresenceHeartbeat({ force: true }).catch(() => {})
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        sendPresenceHeartbeat({ force: true }).catch(() => {})
+      }
+    }
+    try {
+      window.addEventListener('focus', onFocus)
+      document.addEventListener('visibilitychange', onVisibility)
+    } catch {
+      // ignore
+    }
+    return () => {
+      window.clearInterval(intervalId)
+      try {
+        window.removeEventListener('focus', onFocus)
+        document.removeEventListener('visibilitychange', onVisibility)
+      } catch {
+        // ignore
+      }
+    }
+  }, [loggedIn])
 
   useEffect(() => {
     if (!isOnline) return

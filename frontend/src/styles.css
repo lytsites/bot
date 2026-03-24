@@ -653,9 +653,14 @@ button:disabled {
 }
 
 .badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
   background: var(--surface-2);
 }
 .badge.ok { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }

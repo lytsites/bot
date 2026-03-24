@@ -66,7 +66,6 @@ function splitUrls(text) {
     if (!m) break
     if (m.index > last) out.push({ type: 'text', value: src.slice(last, m.index) })
     let url = m[0]
-    // Trim common trailing punctuation.
     while (/[),.!?:;]$/.test(url)) url = url.slice(0, -1)
     out.push({ type: 'link', url })
     last = m.index + m[0].length
@@ -174,16 +173,30 @@ function RichText({ text }) {
   )
 }
 
-export default function ChatThread({ messages }) {
+function assignRef(target, value) {
+  if (!target) return
+  if (typeof target === 'function') {
+    target(value)
+    return
+  }
+  target.current = value
+}
+
+export default function ChatThread({ messages, threadRef = null, autoScroll = true }) {
   const listRef = useRef(null)
   const bottomRef = useRef(null)
 
-  const items = useMemo(() => Array.isArray(messages) ? messages : [], [messages])
+  const items = useMemo(() => (Array.isArray(messages) ? messages : []), [messages])
 
   useEffect(() => {
-    // Keep the newest messages in view (Telegram-like behavior).
+    if (!autoScroll) return
     bottomRef.current?.scrollIntoView({ block: 'end' })
-  }, [items.length])
+  }, [autoScroll, items.length])
+
+  useEffect(() => {
+    assignRef(threadRef, listRef.current)
+    return () => assignRef(threadRef, null)
+  }, [threadRef])
 
   return (
     <div className="chat-thread" ref={listRef}>
