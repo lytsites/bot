@@ -36,6 +36,47 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+function resolveColorValue(value, fallback = '') {
+  if (!value) return fallback
+  const probe = document.createElement('span')
+  probe.style.color = String(value)
+  document.body.appendChild(probe)
+  const resolved = getComputedStyle(probe).color || fallback
+  probe.remove()
+  return resolved
+}
+
+function copySafeStyles(sourceEl, targetEl) {
+  const computed = getComputedStyle(sourceEl)
+  targetEl.style.color = resolveColorValue(computed.color, '#ffffff')
+  targetEl.style.backgroundColor = resolveColorValue(computed.backgroundColor, 'transparent')
+  targetEl.style.borderTopColor = resolveColorValue(computed.borderTopColor, 'transparent')
+  targetEl.style.borderRightColor = resolveColorValue(computed.borderRightColor, 'transparent')
+  targetEl.style.borderBottomColor = resolveColorValue(computed.borderBottomColor, 'transparent')
+  targetEl.style.borderLeftColor = resolveColorValue(computed.borderLeftColor, 'transparent')
+  targetEl.style.outlineColor = resolveColorValue(computed.outlineColor, 'transparent')
+  targetEl.style.textDecorationColor = resolveColorValue(computed.textDecorationColor, targetEl.style.color)
+  targetEl.style.caretColor = resolveColorValue(computed.caretColor, targetEl.style.color)
+  targetEl.style.fill = resolveColorValue(computed.fill, targetEl.style.color)
+  targetEl.style.stroke = resolveColorValue(computed.stroke, 'none')
+
+  // Decorative effects make html2canvas choke on modern color syntaxes and are not critical for archive screenshots.
+  targetEl.style.boxShadow = 'none'
+  targetEl.style.textShadow = 'none'
+  targetEl.style.filter = 'none'
+  targetEl.style.backdropFilter = 'none'
+  targetEl.style.backgroundImage = 'none'
+}
+
+function sanitizeCloneStyles(sourceRoot, targetRoot) {
+  const sourceNodes = [sourceRoot, ...sourceRoot.querySelectorAll('*')]
+  const targetNodes = [targetRoot, ...targetRoot.querySelectorAll('*')]
+  const total = Math.min(sourceNodes.length, targetNodes.length)
+  for (let index = 0; index < total; index += 1) {
+    copySafeStyles(sourceNodes[index], targetNodes[index])
+  }
+}
+
 export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
   if (!threadEl) throw new Error('EXPORT_THREAD_NOT_FOUND')
 
@@ -74,6 +115,7 @@ export async function exportChatThreadAsZip({ threadEl, title, dialogId }) {
   document.body.appendChild(host)
 
   try {
+    sanitizeCloneStyles(threadEl, clone)
     await nextFrame()
 
     const zip = new JSZip()
