@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { formatDateTime } from '../time'
+import { formatDateTime, formatLastOnline } from '../time'
 
 export default function MonitoringAdminAccounts({
   isSuperAdmin,
@@ -301,7 +301,7 @@ export default function MonitoringAdminAccounts({
                   <span className={`tag ${accessTypeMeta(e.mode).cls}`}>{accessTypeMeta(e.mode).label}</span>
                 </span>
               </span>
-              <span>{formatDateTime(u.last_online_at)}</span>
+              <span>{formatLastOnline(u.last_online_at)}</span>
               <span className="row-actions" onClick={ev => ev.stopPropagation()}>
                 <button className="danger" onClick={() => deleteAdminUser(u.id)} disabled={!canDeleteUser(u)}>Удалить</button>
               </span>
