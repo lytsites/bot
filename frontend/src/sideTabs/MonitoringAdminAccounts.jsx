@@ -213,8 +213,24 @@ export default function MonitoringAdminAccounts({
   }
 
   const filteredUsers = useMemo(() => {
-    if (roleFilter === 'all') return adminUsers || []
-    return (adminUsers || []).filter(u => roleMeta(u).key === roleFilter)
+    const users = Array.isArray(adminUsers) ? [...adminUsers] : []
+    const sortByLogin = (a, b) => String(a?.login || '').localeCompare(String(b?.login || ''), 'ru', { sensitivity: 'base' })
+
+    if (roleFilter !== 'all') {
+      return users.filter(u => roleMeta(u).key === roleFilter).sort(sortByLogin)
+    }
+
+    const roleOrder = {
+      superadmin: 0,
+      admin: 1,
+      user: 2,
+    }
+
+    return users.sort((a, b) => {
+      const roleDiff = (roleOrder[roleMeta(a).key] ?? 99) - (roleOrder[roleMeta(b).key] ?? 99)
+      if (roleDiff !== 0) return roleDiff
+      return sortByLogin(a, b)
+    })
   }, [adminUsers, roleFilter])
 
   return (
