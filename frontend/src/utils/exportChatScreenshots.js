@@ -37,6 +37,16 @@ function triggerDownload(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+function resolveColorValue(value, fallback = '') {
+  if (!value) return fallback
+  const probe = document.createElement('span')
+  probe.style.color = String(value)
+  document.body.appendChild(probe)
+  const resolved = getComputedStyle(probe).color || fallback
+  probe.remove()
+  return resolved
+}
+
 function createMessageRow(message) {
   const outgoing = String(message?.direction || '').toUpperCase() !== 'IN'
 
@@ -79,7 +89,7 @@ function createMessageRow(message) {
   return row
 }
 
-function createPageShell(viewportWidth, viewportHeight) {
+function createPageShell(viewportWidth, viewportHeight, threadStyle) {
   const page = document.createElement('div')
   page.style.width = `${viewportWidth}px`
   page.style.height = `${viewportHeight}px`
@@ -96,17 +106,22 @@ function createPageShell(viewportWidth, viewportHeight) {
   thread.style.flex = '1'
   thread.style.minHeight = '0'
   thread.style.overflow = 'hidden'
-  thread.style.borderRadius = '20px'
+  thread.style.borderRadius = threadStyle?.borderRadius || '20px'
   thread.style.padding = '16px'
   thread.style.boxSizing = 'border-box'
-  thread.style.background = 'rgb(32, 39, 54)'
+  thread.style.backgroundColor = threadStyle?.backgroundColor || 'rgb(32, 39, 54)'
+  thread.style.backgroundImage = threadStyle?.backgroundImage || 'none'
+  thread.style.backgroundSize = threadStyle?.backgroundSize || 'cover'
+  thread.style.backgroundPosition = threadStyle?.backgroundPosition || 'center'
+  thread.style.backgroundRepeat = threadStyle?.backgroundRepeat || 'no-repeat'
+  thread.style.border = threadStyle?.border || '1px solid rgba(255,255,255,0.08)'
   thread.style.display = 'block'
 
   page.appendChild(thread)
   return { page, thread }
 }
 
-function buildPages({ messages, viewportWidth, viewportHeight }) {
+function buildPages({ messages, viewportWidth, viewportHeight, threadStyle }) {
   const host = document.createElement('div')
   host.style.position = 'fixed'
   host.style.left = '-100000px'
@@ -118,7 +133,7 @@ function buildPages({ messages, viewportWidth, viewportHeight }) {
 
   try {
     const pages = []
-    let current = createPageShell(viewportWidth, viewportHeight)
+    let current = createPageShell(viewportWidth, viewportHeight, threadStyle)
     host.appendChild(current.page)
     pages.push(current.page)
 
@@ -127,7 +142,7 @@ function buildPages({ messages, viewportWidth, viewportHeight }) {
       current.thread.appendChild(row)
       if (current.thread.scrollHeight > current.thread.clientHeight && current.thread.childElementCount > 1) {
         current.thread.removeChild(row)
-        current = createPageShell(viewportWidth, viewportHeight)
+        current = createPageShell(viewportWidth, viewportHeight, threadStyle)
         host.appendChild(current.page)
         pages.push(current.page)
         current.thread.appendChild(row)
@@ -141,7 +156,7 @@ function buildPages({ messages, viewportWidth, viewportHeight }) {
   }
 }
 
-export async function exportChatThreadAsZip({ messages, title, dialogId, viewportWidth, viewportHeight }) {
+export async function exportChatThreadAsZip({ messages, title, dialogId, viewportWidth, viewportHeight, threadEl }) {
   const items = Array.isArray(messages) ? messages : []
   if (!items.length) throw new Error('EXPORT_NO_MESSAGES')
 
@@ -149,10 +164,24 @@ export async function exportChatThreadAsZip({ messages, title, dialogId, viewpor
   const safeHeight = Math.max(420, Math.round(viewportHeight || 640))
   const scale = Math.min(window.devicePixelRatio || 1, 2)
 
+  const computed = threadEl ? getComputedStyle(threadEl) : null
+  const threadStyle = {
+    backgroundColor: resolveColorValue(computed?.backgroundColor, 'rgb(32, 39, 54)'),
+    backgroundImage: computed?.backgroundImage && computed.backgroundImage !== 'none' ? computed.backgroundImage : 'none',
+    backgroundSize: computed?.backgroundSize || 'cover',
+    backgroundPosition: computed?.backgroundPosition || 'center',
+    backgroundRepeat: computed?.backgroundRepeat || 'no-repeat',
+    borderRadius: computed?.borderRadius || '20px',
+    border: computed
+      ? `${computed.borderTopWidth || '1px'} ${computed.borderTopStyle || 'solid'} ${resolveColorValue(computed.borderTopColor, 'rgba(255,255,255,0.08)')}`
+      : '1px solid rgba(255,255,255,0.08)',
+  }
+
   const { host, pages } = buildPages({
     messages: items,
     viewportWidth: safeWidth,
     viewportHeight: safeHeight,
+    threadStyle,
   })
 
   try {

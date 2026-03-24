@@ -68,6 +68,7 @@ export default function HomeAutoChatHistory({
         dialogId: homeAutoChatHistoryActive.dialog_id,
         viewportWidth: rect.width,
         viewportHeight: rect.height,
+        threadEl: threadRef.current,
       })
       setExportStatus(`Архив готов: ${result.pageCount} экранов`)
     } catch (e) {
