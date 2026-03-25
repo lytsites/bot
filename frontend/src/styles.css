@@ -706,6 +706,17 @@ button:disabled {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   font-size: 13px;
+  border: 1px solid transparent;
+}
+
+.table-row.role-superadmin {
+  border-color: color-mix(in srgb, #ffb54a 55%, transparent);
+  box-shadow: 0 10px 20px color-mix(in srgb, #ffb54a 10%, transparent);
+}
+
+.table-row.role-admin {
+  border-color: color-mix(in srgb, var(--brand) 55%, transparent);
+  box-shadow: 0 10px 20px color-mix(in srgb, var(--brand) 10%, transparent);
 }
 
 .row-actions {

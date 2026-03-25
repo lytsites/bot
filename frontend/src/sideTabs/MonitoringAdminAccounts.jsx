@@ -22,8 +22,8 @@ export default function MonitoringAdminAccounts({
   deleteAdminAccount,
   loadAdminUserLoginHistory,
 }) {
-  const [roleFilter, setRoleFilter] = useState('all') // all|user|admin|superadmin
-  const [edits, setEdits] = useState({}) // userId -> { mode, is_active }
+  const [roleFilter, setRoleFilter] = useState('all')
+  const [edits, setEdits] = useState({})
   const [userModalOpen, setUserModalOpen] = useState(false)
   const [userModalUser, setUserModalUser] = useState(null)
   const [commentModalOpen, setCommentModalOpen] = useState(false)
@@ -38,8 +38,12 @@ export default function MonitoringAdminAccounts({
 
   const roleMeta = u => {
     const role = String(u?.role || '').toLowerCase()
-    if (role === 'superadmin' || u?.is_super_admin) return { label: 'Супер-админ', cls: 'warn', key: 'superadmin' }
-    if (role === 'admin' || u?.is_admin) return { label: 'Админ', cls: 'info', key: 'admin' }
+    if (role === 'superadmin' || u?.is_super_admin) {
+      return { label: 'Супер-админ', cls: 'warn', key: 'superadmin' }
+    }
+    if (role === 'admin' || u?.is_admin) {
+      return { label: 'Админ', cls: 'info', key: 'admin' }
+    }
     return { label: 'Пользователь', cls: 'muted', key: 'user' }
   }
 
@@ -50,20 +54,15 @@ export default function MonitoringAdminAccounts({
     return true
   }
 
-  const canEditUser = u => {
-    // Same permissions model as delete: admin can manage users; superadmin can manage admins too.
-    return canDeleteUser(u)
-  }
+  const canEditUser = u => canDeleteUser(u)
 
   const modeFromUser = u => {
-    // Be defensive: if backend doesn't return these columns (older DB / migrations not applied),
-    // treat missing values as enabled to avoid showing everything as "disabled".
     const svcRaw = u?.service_enabled
     const gRaw = u?.feature_group_reading_enabled
     const aRaw = u?.feature_auto_dialogs_enabled
-    const svc = svcRaw == null ? true : (svcRaw === true || svcRaw === 1 || svcRaw === '1')
-    const g = gRaw == null ? true : (gRaw === true || gRaw === 1 || gRaw === '1')
-    const a = aRaw == null ? true : (aRaw === true || aRaw === 1 || aRaw === '1')
+    const svc = svcRaw == null ? true : svcRaw === true || svcRaw === 1 || svcRaw === '1'
+    const g = gRaw == null ? true : gRaw === true || gRaw === 1 || gRaw === '1'
+    const a = aRaw == null ? true : aRaw === true || aRaw === 1 || aRaw === '1'
     if (!svc) return 'disabled'
     if (g && a) return 'both'
     if (!g && a) return 'no_groups'
@@ -72,17 +71,31 @@ export default function MonitoringAdminAccounts({
   }
 
   const flagsFromMode = mode => {
-    if (mode === 'no_groups') return { service_enabled: true, feature_group_reading_enabled: false, feature_auto_dialogs_enabled: true }
-    if (mode === 'no_auto') return { service_enabled: true, feature_group_reading_enabled: true, feature_auto_dialogs_enabled: false }
-    if (mode === 'disabled') return { service_enabled: false, feature_group_reading_enabled: false, feature_auto_dialogs_enabled: false }
+    if (mode === 'no_groups') {
+      return { service_enabled: true, feature_group_reading_enabled: false, feature_auto_dialogs_enabled: true }
+    }
+    if (mode === 'no_auto') {
+      return { service_enabled: true, feature_group_reading_enabled: true, feature_auto_dialogs_enabled: false }
+    }
+    if (mode === 'disabled') {
+      return { service_enabled: false, feature_group_reading_enabled: false, feature_auto_dialogs_enabled: false }
+    }
     return { service_enabled: true, feature_group_reading_enabled: true, feature_auto_dialogs_enabled: true }
   }
 
   const accessTypeMeta = mode => {
     if (mode === 'no_groups') return { label: 'Тип 1', cls: 'muted' }
     if (mode === 'no_auto') return { label: 'Тип 2', cls: 'muted' }
-    if (mode === 'disabled') return { label: 'Отключён', cls: 'warn' }
+    if (mode === 'disabled') return { label: 'Отключен', cls: 'warn' }
     return { label: 'Оба', cls: 'success' }
+  }
+
+  const lastOnlineMeta = value => {
+    const label = formatLastOnline(value)
+    return {
+      label,
+      cls: label === 'Онлайн' ? 'success' : 'muted',
+    }
   }
 
   const getEdit = u => {
@@ -165,12 +178,12 @@ export default function MonitoringAdminAccounts({
     return () => {
       cancelled = true
     }
-  }, [userModalOpen, userModalUser?.id, loginHistoryPage])
+  }, [userModalOpen, userModalUser?.id, loginHistoryPage, loadAdminUserLoginHistory])
 
   const openSaveModal = u => {
     if (!u) return
     setCommentModalUser(u)
-    setCommentDraft('') // всегда пустой, как ты просил
+    setCommentDraft('')
     setCommentModalOpen(true)
   }
 
@@ -181,10 +194,7 @@ export default function MonitoringAdminAccounts({
   }
 
   const cancelSave = () => {
-    // отмена отменяет локальные изменения (роль/флаги не отправляются на сервер)
-    if (commentModalUser?.id != null) {
-      discardEdits(commentModalUser.id)
-    }
+    if (commentModalUser?.id != null) discardEdits(commentModalUser.id)
     closeSaveModal()
   }
 
@@ -198,9 +208,8 @@ export default function MonitoringAdminAccounts({
       service_enabled: flags.service_enabled,
       feature_group_reading_enabled: flags.feature_group_reading_enabled,
       feature_auto_dialogs_enabled: flags.feature_auto_dialogs_enabled,
+      disabled_comment: String(commentDraft || ''),
     }
-    // Always send disabled_comment, even if empty: empty clears the previous comment.
-    patch.disabled_comment = String(commentDraft || '')
     await updateAdminUser(u.id, patch)
     setEdits(prev => {
       const next = { ...prev }
@@ -208,13 +217,13 @@ export default function MonitoringAdminAccounts({
       return next
     })
     closeSaveModal()
-    // Close the user edit modal only after a successful save.
     closeUserModal()
   }
 
   const filteredUsers = useMemo(() => {
     const users = Array.isArray(adminUsers) ? [...adminUsers] : []
-    const sortByLogin = (a, b) => String(a?.login || '').localeCompare(String(b?.login || ''), 'ru', { sensitivity: 'base' })
+    const sortByLogin = (a, b) =>
+      String(a?.login || '').localeCompare(String(b?.login || ''), 'ru', { sensitivity: 'base' })
 
     if (roleFilter !== 'all') {
       return users.filter(u => roleMeta(u).key === roleFilter).sort(sortByLogin)
@@ -289,43 +298,40 @@ export default function MonitoringAdminAccounts({
           <div className="table-head">
             <span>ID</span>
             <span>Логин</span>
-            <span>Роль</span>
+            <span>Доступ</span>
             <span>Последний онлайн</span>
             <span>Действия</span>
           </div>
-          {filteredUsers.map(u => (
-            <div
-              className="table-row"
-              key={`u-${u.id}`}
-              role="button"
-              tabIndex={0}
-              onClick={() => openUserModal(u)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' || e.key === ' ') openUserModal(u)
-              }}
-              style={{ cursor: 'pointer' }}
-            >
-              {(() => {
-                const e = getEdit(u)
-                return (
-                  <>
-              <span>#{u.id}</span>
-              <span>{u.login}</span>
-              <span>
-                <span className="tag-stack">
-                  <span className={`tag ${roleMeta(u).cls}`}>{roleMeta(u).label}</span>
+          {filteredUsers.map(u => {
+            const e = getEdit(u)
+            const online = lastOnlineMeta(u.last_online_at)
+            const role = roleMeta(u)
+            return (
+              <div
+                className={`table-row role-${role.key}`}
+                key={`u-${u.id}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => openUserModal(u)}
+                onKeyDown={ev => {
+                  if (ev.key === 'Enter' || ev.key === ' ') openUserModal(u)
+                }}
+                style={{ cursor: 'pointer' }}
+              >
+                <span>#{u.id}</span>
+                <span>{u.login}</span>
+                <span>
                   <span className={`tag ${accessTypeMeta(e.mode).cls}`}>{accessTypeMeta(e.mode).label}</span>
                 </span>
-              </span>
-              <span>{formatLastOnline(u.last_online_at)}</span>
-              <span className="row-actions" onClick={ev => ev.stopPropagation()}>
-                <button className="danger" onClick={() => deleteAdminUser(u.id)} disabled={!canDeleteUser(u)}>Удалить</button>
-              </span>
-                  </>
-                )
-              })()}
-            </div>
-          ))}
+                <span>
+                  <span className={`tag ${online.cls}`}>{online.label}</span>
+                </span>
+                <span className="row-actions" onClick={ev => ev.stopPropagation()}>
+                  <button className="danger" onClick={() => deleteAdminUser(u.id)} disabled={!canDeleteUser(u)}>Удалить</button>
+                </span>
+              </div>
+            )
+          })}
         </div>
       </section>
 
@@ -363,7 +369,7 @@ export default function MonitoringAdminAccounts({
                         onChange={ev => setEdit(userModalUser.id, { is_active: ev.target.checked })}
                         disabled={!editable}
                       />
-                      <span className={`tag ${e.is_active ? 'success' : 'muted'}`}>{e.is_active ? 'Активен' : 'Отключён'}</span>
+                      <span className={`tag ${e.is_active ? 'success' : 'muted'}`}>{e.is_active ? 'Активен' : 'Отключен'}</span>
                     </label>
                   </div>
 
@@ -377,12 +383,12 @@ export default function MonitoringAdminAccounts({
                       <option value="both">Оба</option>
                       <option value="no_groups">Тип 1 (без Чтения групп)</option>
                       <option value="no_auto">Тип 2 (без Авто. диалогов)</option>
-                      <option value="disabled">Отключён</option>
+                      <option value="disabled">Отключен</option>
                     </select>
                   </div>
 
                   <div className="field">
-                    <label>Комментарий (последний сохранённый)</label>
+                    <label>Комментарий (последний сохраненный)</label>
                     <div className="status muted">{currentComment || '—'}</div>
                   </div>
 
@@ -509,7 +515,7 @@ export default function MonitoringAdminAccounts({
               <span>#{a.id}</span>
               <span>{a.display_name || 'Без имени'}</span>
               <span>{a.local_login || `#${a.local_user_id}`}</span>
-              <span><span className={`tag ${a.is_active ? 'success' : 'muted'}`}>{a.is_active ? 'Активен' : 'Отключён'}</span></span>
+              <span><span className={`tag ${a.is_active ? 'success' : 'muted'}`}>{a.is_active ? 'Активен' : 'Отключен'}</span></span>
               <span className="row-actions">
                 <button className="danger" onClick={() => deleteAdminAccount(a.id)}>Удалить</button>
               </span>
