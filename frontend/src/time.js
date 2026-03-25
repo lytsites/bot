@@ -1,6 +1,7 @@
 const ALMATY_TZ = 'Asia/Almaty'
 const OFFSET_SUFFIX = '+05:00'
 const HAS_TZ_RE = /([zZ]|[+-]\d{2}:\d{2})$/
+const ONLINE_GRACE_MS = 90 * 1000
 
 function normalizeIsoString(value) {
   const raw = String(value || '').trim()
@@ -46,6 +47,7 @@ export function formatLastOnline(value, nowValue = new Date()) {
 
   const now = toAlmatyDate(nowValue)
   if (!now) return formatDateTime(value)
+  if (now.getTime() - dt.getTime() <= ONLINE_GRACE_MS) return 'Онлайн'
 
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: ALMATY_TZ,
