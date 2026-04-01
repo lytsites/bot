@@ -162,11 +162,12 @@ def _active_qr_flow_exists(con, local_user_id: int) -> bool:
         FROM auth_flows
         WHERE local_user_id=?
           AND method=?
-          AND status IN (?, ?, ?)
+          AND status IN (?, ?, ?, ?)
         """,
         (
             local_user_id,
             METHOD_QR,
+            STATUS_QR_INIT,
             STATUS_QR_READY,
             STATUS_QR_WAIT_CONFIRM,
             STATUS_WAIT_PASSWORD,
@@ -179,6 +180,8 @@ def _active_qr_flow_exists(con, local_user_id: int) -> bool:
         if status in (STATUS_QR_READY, STATUS_QR_WAIT_CONFIRM):
             qr_expires = _parse_iso(row["qr_expires_at"])
             effective_expires = qr_expires or flow_expires
+        elif status == STATUS_QR_INIT:
+            effective_expires = flow_expires
         else:
             # WAIT_PASSWORD can still be completed without QR refresh.
             effective_expires = flow_expires
@@ -889,29 +892,6 @@ async def _qr_create_flow(auth_id: str, local_user_id: int) -> dict:
         enc_token = encrypt_text(qr_url)
         qr_expires_at = parse_iso_local(qr_login.expires.isoformat()).isoformat()
 
-        with db() as con:
-            con.execute(
-                """
-                INSERT INTO auth_flows(auth_id, phone, status, temp_session, phone_code_hash, expires_at, method,
-                                       qr_token, qr_expires_at, qr_refresh_after, error_message, local_user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    auth_id,
-                    None,
-                    STATUS_QR_READY,
-                    enc_temp,
-                    None,
-                    expires_at_iso(),
-                    METHOD_QR,
-                    enc_token,
-                    qr_expires_at,
-                    qr_refresh_after_iso(),
-                    None,
-                    local_user_id,
-                ),
-            )
-
         state = QRFlowState(client=client, qr_login=qr_login, auth_id=auth_id)
         with _qr_lock:
             _qr_flows[auth_id] = state
@@ -921,6 +901,8 @@ async def _qr_create_flow(auth_id: str, local_user_id: int) -> dict:
             "auth_id": auth_id,
             "status": STATUS_QR_READY,
             "qr_data_url": qr_png,
+            "temp_session": enc_temp,
+            "qr_token": enc_token,
             "expires_at": qr_expires_at,
             "refresh_after": qr_refresh_after_iso(),
         }
@@ -930,6 +912,54 @@ async def _qr_create_flow(auth_id: str, local_user_id: int) -> dict:
     except Exception:
         await client.disconnect()
         raise
+
+
+async def _qr_prepare_flow(auth_id: str, local_user_id: int) -> None:
+    result = await _qr_create_flow(auth_id, local_user_id)
+
+    def _finalize(con):
+        con.execute(
+            """
+            UPDATE auth_flows
+            SET status=?, temp_session=?, qr_token=?, qr_expires_at=?, qr_refresh_after=?, error_message=NULL
+            WHERE auth_id=? AND local_user_id=? AND method=?
+            """,
+            (
+                result["status"],
+                result["temp_session"],
+                result["qr_token"],
+                result["expires_at"],
+                result["refresh_after"],
+                auth_id,
+                local_user_id,
+                METHOD_QR,
+            ),
+        )
+
+    await _db_write_with_timeout(_finalize, timeout=10.0)
+
+
+def _start_qr_prepare_task(auth_id: str, local_user_id: int) -> None:
+    future = asyncio.run_coroutine_threadsafe(_qr_prepare_flow(auth_id, local_user_id), _qr_loop)
+
+    def _done_callback(done_future):
+        try:
+            done_future.result()
+        except RuntimeError as exc:
+            msg = str(exc)
+            if msg == "QR_START_TIMEOUT":
+                logger.exception("auth.qr start timeout auth_id=%s", auth_id)
+                _set_error(auth_id, "QR_START_TIMEOUT")
+            else:
+                logger.exception("auth.qr start failed auth_id=%s", auth_id)
+                _set_error(auth_id, msg or "QR_START_FAILED")
+            _qr_disconnect(auth_id)
+        except Exception:
+            logger.exception("auth.qr start failed auth_id=%s", auth_id)
+            _set_error(auth_id, "QR_START_FAILED")
+            _qr_disconnect(auth_id)
+
+    future.add_done_callback(_done_callback)
 
 
 async def _qr_refresh_flow(auth_id: str) -> dict:
@@ -998,12 +1028,13 @@ def start_qr_auth(local_user_id: int) -> dict:
             FROM auth_flows
             WHERE local_user_id=?
               AND method=?
-              AND status IN (?, ?, ?)
+              AND status IN (?, ?, ?, ?)
               AND expires_at > ?
             """,
             (
                 local_user_id,
                 METHOD_QR,
+                STATUS_QR_INIT,
                 STATUS_QR_READY,
                 STATUS_QR_WAIT_CONFIRM,
                 STATUS_WAIT_PASSWORD,
@@ -1023,11 +1054,35 @@ def start_qr_auth(local_user_id: int) -> dict:
         if _active_qr_flow_exists(con, local_user_id):
             raise ValueError("AUTH_IN_PROGRESS")
     auth_id = str(uuid.uuid4())
-    try:
-        return _run_qr(_qr_create_flow(auth_id, local_user_id), timeout=QR_START_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
-        logger.exception("auth.qr start timeout auth_id=%s", auth_id)
-        raise RuntimeError("QR_START_TIMEOUT")
+    enc_empty = encrypt_text("")
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO auth_flows(auth_id, phone, status, temp_session, phone_code_hash, expires_at, method,
+                                   qr_token, qr_expires_at, qr_refresh_after, error_message, local_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                auth_id,
+                None,
+                STATUS_QR_INIT,
+                enc_empty,
+                None,
+                expires_at_iso(),
+                METHOD_QR,
+                None,
+                None,
+                None,
+                None,
+                local_user_id,
+            ),
+        )
+    _start_qr_prepare_task(auth_id, local_user_id)
+    return {
+        "auth_id": auth_id,
+        "status": STATUS_QR_INIT,
+        "expires_at": expires_at_iso(),
+    }
 
 
 def refresh_qr_auth(auth_id: str) -> dict:
@@ -1051,7 +1106,11 @@ def refresh_qr_auth(auth_id: str) -> dict:
 def continue_qr_auth(auth_id: str) -> dict:
     with db() as con:
         row = con.execute(
-            "SELECT status, expires_at, error_message, method FROM auth_flows WHERE auth_id=?",
+            """
+            SELECT status, expires_at, error_message, method, qr_token, qr_expires_at, qr_refresh_after
+            FROM auth_flows
+            WHERE auth_id=?
+            """,
             (auth_id,),
         ).fetchone()
     if not row:
@@ -1064,9 +1123,17 @@ def continue_qr_auth(auth_id: str) -> dict:
     status = row["status"]
     if status == STATUS_QR_READY:
         status = STATUS_QR_WAIT_CONFIRM
-    return {
+    result = {
         "auth_id": auth_id,
         "status": status,
         "error_message": row["error_message"],
         "expires_at": row["expires_at"],
     }
+    if row["qr_token"] and status in (STATUS_QR_WAIT_CONFIRM, STATUS_QR_READY):
+        try:
+            result["qr_data_url"] = _qr_make_png_data_url(decrypt_text(row["qr_token"]))
+        except Exception:
+            logger.exception("auth.qr continue decode failed auth_id=%s", auth_id)
+        result["qr_expires_at"] = row["qr_expires_at"]
+        result["refresh_after"] = row["qr_refresh_after"]
+    return result

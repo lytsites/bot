@@ -282,6 +282,9 @@ export default function App() {
     LOGIN_EXISTS: 'Логин уже существует',
     PHONE_EXISTS: 'Номер уже добавлен',
     PASSWORD_FAILED: 'Неверный пароль 2FA',
+    QR_START_TIMEOUT: 'Telegram too long to prepare QR. Try again',
+    QR_START_FAILED: 'Failed to prepare QR login',
+    QR_STALE_FLOW_CLEANED: 'Previous QR flow expired. Start a new one',
     CODE_INVALID: 'Неверный код',
     PHONE_CODE_INVALID: 'Неверный код',
     PHONE_NUMBER_INVALID: 'Неверный номер телефона',
@@ -815,6 +818,9 @@ export default function App() {
     try {
       const r = await authPost('/auth/qr/continue', { auth_id: qrAuthId })
       setQrStatus(r.status)
+      if (r.qr_data_url) setQrDataUrl(r.qr_data_url)
+      if (r.qr_expires_at) setQrExpiresAt(r.qr_expires_at)
+      if (r.refresh_after) setQrRefreshAfter(r.refresh_after)
       if (r.error_message) {
         setQrErr(r.error_message)
       }
